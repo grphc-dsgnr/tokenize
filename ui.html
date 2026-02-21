@@ -267,6 +267,110 @@
     font-size: 11px;
   }
 
+  /* =========================================================
+     Library collection picker
+     ========================================================= */
+  #collection-picker {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  #collection-picker-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  #collection-picker-header span {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  #btn-refresh-collections {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 0 2px;
+    font-family: var(--font);
+    transition: color .15s;
+  }
+  #btn-refresh-collections:hover { color: var(--accent-hover); }
+  #btn-refresh-collections:disabled { color: var(--text-muted); cursor: default; }
+
+  #collection-list {
+    max-height: 130px;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+
+  .collection-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    cursor: pointer;
+    transition: background .1s;
+  }
+  .collection-item:hover { background: var(--surface-2); }
+
+  .collection-item input[type="checkbox"] {
+    width: auto;
+    accent-color: var(--accent);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .collection-item-label {
+    flex: 1;
+    overflow: hidden;
+  }
+  .collection-item-name {
+    font-size: 11px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .collection-item-lib {
+    font-size: 10px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .collection-item-badge {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 10px;
+    flex-shrink: 0;
+  }
+  .badge-local    { background: #2d3a2d; color: var(--green); }
+  .badge-library  { background: #2a2d3a; color: #7aa2f7; }
+
+  #collection-empty {
+    padding: 10px 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: center;
+  }
+  #collection-loading {
+    padding: 10px 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+  }
+
   /* Loading indicator */
   #loading {
     display: none;
@@ -374,9 +478,27 @@
        ====================================================== -->
   <div id="main">
 
-    <!-- Collection filter -->
+    <!-- Library collection picker -->
     <div>
-      <label class="field-label" for="collection-filter">Variable collection filter</label>
+      <label class="field-label">Library collections</label>
+      <div id="collection-picker">
+        <div id="collection-picker-header">
+          <span id="collection-picker-hint">Select collections to scan</span>
+          <button id="btn-refresh-collections" title="Refresh collection list">↻ Refresh</button>
+        </div>
+        <div id="collection-list">
+          <div id="collection-loading">
+            <div class="spinner"></div> Loading…
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Collection filter fallback (used only when no collections are checked) -->
+    <div>
+      <label class="field-label" for="collection-filter">
+        Name filter <span style="color:var(--text-muted);font-weight:400">(fallback if none selected above)</span>
+      </label>
       <input
         type="text"
         id="collection-filter"
@@ -461,6 +583,9 @@ let currentScope = "selection";
 let scanFindings = [];   // Finding[] from the last scan
 let fullLogText  = "";   // Plain-text accumulator for "Copy Log"
 
+/** @type {{ type: 'local', id: string, name: string } | { type: 'library', key: string, name: string, libraryName: string }[]} */
+let availableCollections = [];   // all known collections (populated on load)
+
 // ---- Element refs -----------------------------------------------------------
 const elFilter      = document.getElementById("collection-filter");
 const elBtnScan     = document.getElementById("btn-scan");
@@ -480,6 +605,101 @@ const elDebugLog    = document.getElementById("debug-log");
 const elLogCount    = document.getElementById("log-count");
 const elDebugToggle = document.getElementById("debug-toggle");
 const elDebugPanel  = document.getElementById("debug-panel");
+const elCollectionList    = document.getElementById("collection-list");
+const elCollectionLoading = document.getElementById("collection-loading");
+const elCollectionHint    = document.getElementById("collection-picker-hint");
+const elBtnRefresh        = document.getElementById("btn-refresh-collections");
+
+// ---- Collection picker ------------------------------------------------------
+
+function renderCollections(local, library) {
+  availableCollections = [
+    ...local.map((c) => ({ type: "local", id: c.id, name: c.name })),
+    ...library.map((c) => ({ type: "library", key: c.key, name: c.name, libraryName: c.libraryName })),
+  ];
+
+  elCollectionList.innerHTML = "";
+
+  if (availableCollections.length === 0) {
+    const empty = document.createElement("div");
+    empty.id = "collection-empty";
+    empty.textContent = "No collections found";
+    elCollectionList.appendChild(empty);
+    elCollectionHint.textContent = "No collections available";
+    return;
+  }
+
+  for (const col of availableCollections) {
+    const item = document.createElement("label");
+    item.className = "collection-item";
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.dataset.type = col.type;
+    cb.dataset.id   = col.type === "local" ? col.id : col.key;
+    cb.addEventListener("change", updateCollectionHint);
+
+    const labelWrap = document.createElement("div");
+    labelWrap.className = "collection-item-label";
+
+    const nameEl = document.createElement("div");
+    nameEl.className = "collection-item-name";
+    nameEl.textContent = col.name;
+    nameEl.title = col.name;
+    labelWrap.appendChild(nameEl);
+
+    if (col.type === "library") {
+      const libEl = document.createElement("div");
+      libEl.className = "collection-item-lib";
+      libEl.textContent = col.libraryName;
+      libEl.title = col.libraryName;
+      labelWrap.appendChild(libEl);
+    }
+
+    const badge = document.createElement("span");
+    badge.className = "collection-item-badge " + (col.type === "local" ? "badge-local" : "badge-library");
+    badge.textContent = col.type === "local" ? "local" : "library";
+
+    item.appendChild(cb);
+    item.appendChild(labelWrap);
+    item.appendChild(badge);
+    elCollectionList.appendChild(item);
+  }
+
+  updateCollectionHint();
+}
+
+function updateCollectionHint() {
+  const checked = elCollectionList.querySelectorAll("input[type=checkbox]:checked");
+  if (checked.length === 0) {
+    elCollectionHint.textContent = "Using name filter (none selected)";
+  } else {
+    elCollectionHint.textContent = `${checked.length} collection${checked.length > 1 ? "s" : ""} selected`;
+  }
+}
+
+function getSelectedCollectionIds() {
+  const localIds = [];
+  const libraryKeys = [];
+  elCollectionList.querySelectorAll("input[type=checkbox]:checked").forEach((cb) => {
+    if (cb.dataset.type === "local") {
+      localIds.push(cb.dataset.id);
+    } else {
+      libraryKeys.push(cb.dataset.id);
+    }
+  });
+  return { localIds, libraryKeys };
+}
+
+elBtnRefresh.addEventListener("click", () => {
+  elBtnRefresh.disabled = true;
+  elCollectionList.innerHTML = "";
+  const loading = document.createElement("div");
+  loading.id = "collection-loading";
+  loading.innerHTML = '<div class="spinner"></div> Loading…';
+  elCollectionList.appendChild(loading);
+  parent.postMessage({ pluginMessage: { type: "get-collections" } }, "*");
+});
 
 // ---- Scope toggle -----------------------------------------------------------
 document.querySelectorAll(".toggle-btn").forEach((btn) => {
@@ -493,6 +713,7 @@ document.querySelectorAll(".toggle-btn").forEach((btn) => {
 // ---- Scan -------------------------------------------------------------------
 elBtnScan.addEventListener("click", () => {
   const filter = elFilter.value.trim() || "spacing";
+  const { localIds, libraryKeys } = getSelectedCollectionIds();
   clearError();
   setLoading(true, "Scanning…");
   hideSummary();
@@ -502,7 +723,13 @@ elBtnScan.addEventListener("click", () => {
   scanFindings = [];
 
   parent.postMessage({
-    pluginMessage: { type: "scan", collectionFilter: filter, scope: currentScope }
+    pluginMessage: {
+      type: "scan",
+      collectionFilter: filter,
+      scope: currentScope,
+      selectedLocalIds: localIds,
+      selectedLibraryKeys: libraryKeys,
+    }
   }, "*");
 });
 
@@ -521,6 +748,11 @@ elBtnReplace.addEventListener("click", () => {
 window.onmessage = (event) => {
   const msg = event.data.pluginMessage;
   if (!msg) return;
+
+  if (msg.type === "collections-list") {
+    elBtnRefresh.disabled = false;
+    renderCollections(msg.local || [], msg.library || []);
+  }
 
   if (msg.type === "scan-results") {
     setLoading(false);
