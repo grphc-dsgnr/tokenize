@@ -251,10 +251,14 @@
     overflow-y: auto;
   }
   .unresolved-item {
-    padding: 2px 0;
+    padding: 4px 6px;
     border-bottom: 1px solid #3a2020;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: background .1s;
   }
   .unresolved-item:last-child { border-bottom: none; }
+  .unresolved-item:hover { background: #3a2020; }
 
   /* Error banner */
   #error-banner {
@@ -546,7 +550,7 @@
     <!-- Unresolved list -->
     <div id="unresolved-section">
       <label class="field-label" style="margin-bottom:4px; color: var(--red)">
-        Unresolved — no matching token found
+        Unresolved — click any item to select it in Figma
       </label>
       <div id="unresolved-list"></div>
     </div>
@@ -764,7 +768,7 @@ window.onmessage = (event) => {
     setLoading(false);
     scanFindings = msg.findings || [];
     renderFindings(scanFindings);
-    showSummary(msg.replaced, msg.unresolved, scanFindings);
+    showSummary(msg.replaced, msg.unresolved);
   }
 
   if (msg.type === "debug-log") {
@@ -846,15 +850,8 @@ function renderFindings(findings) {
 
   // Enable Replace All if there are any matched (un-replaced) findings
   elBtnReplace.disabled = matched === 0;
-}
 
-// ---- Summary ----------------------------------------------------------------
-function showSummary(replaced, unresolved, findings) {
-  elSummary.style.display = "block";
-  elStatReplaced.textContent   = replaced;
-  elStatUnresolved.textContent = unresolved;
-
-  // Show unresolved list if any
+  // Show unresolved section immediately so the user can find & fix them
   const unresolvedFindings = findings.filter((f) => !f.matchedVariableId && !f.replaced);
   if (unresolvedFindings.length > 0) {
     elUnresolvedSec.style.display = "block";
@@ -863,9 +860,22 @@ function showSummary(replaced, unresolved, findings) {
       const item = document.createElement("div");
       item.className = "unresolved-item";
       item.textContent = `${f.nodeName} — ${f.property}: ${f.rawValue}px`;
+      item.title = "Click to select in Figma";
+      item.addEventListener("click", () => {
+        parent.postMessage({ pluginMessage: { type: "select-node", nodeId: f.nodeId } }, "*");
+      });
       elUnresolvedList.appendChild(item);
     }
+  } else {
+    hideUnresolved();
   }
+}
+
+// ---- Summary ----------------------------------------------------------------
+function showSummary(replaced, unresolved) {
+  elSummary.style.display = "block";
+  elStatReplaced.textContent   = replaced;
+  elStatUnresolved.textContent = unresolved;
 }
 
 function hideSummary() {

@@ -577,6 +577,7 @@ figma.ui.onmessage = async (msg: {
   selectedLocalIds?: string[];
   selectedLibraryKeys?: string[];
   findings?: Finding[];
+  nodeId?: string;
 }) => {
   // ---- Collection list request (manual refresh) ----
   if (msg.type === "get-collections") {
@@ -623,6 +624,16 @@ figma.ui.onmessage = async (msg: {
       log("error", errMsg);
       flushLog();
       figma.ui.postMessage({ type: "error", message: errMsg });
+    }
+    return;
+  }
+
+  // ---- Select node request ----
+  if (msg.type === "select-node" && msg.nodeId) {
+    const node = figma.getNodeById(msg.nodeId);
+    if (node && node.type !== "DOCUMENT" && node.type !== "PAGE") {
+      figma.currentPage.selection = [node as SceneNode];
+      figma.viewport.scrollAndZoomIntoView([node as SceneNode]);
     }
     return;
   }
