@@ -12,6 +12,7 @@
 //                 { type: 'debug-log', entries: LogEntry[] }
 //                 { type: 'error', message: string }
 //                 { type: 'collections-list', local: CollectionInfo[], library: LibraryCollectionInfo[] }
+//                 { type: 'progress', phase: 'tokens' | 'scan', current?: number, total?: number }
 //   ui → plugin:  { type: 'scan', collectionFilter: string, scope: 'selection' | 'page',
 //                          selectedLocalIds?: string[], selectedLibraryKeys?: string[] }
 //                 { type: 'replace', findings: Finding[] }
@@ -179,6 +180,8 @@ async function buildValueMap(
 
   const usingExplicitSelection = selectedLocalIds.length > 0 || selectedLibraryKeys.length > 0;
 
+  figma.ui.postMessage({ type: "progress", phase: "tokens" });
+
   log(
     "info",
     usingExplicitSelection
@@ -318,12 +321,16 @@ async function buildValueMap(
       continue;
     }
 
-    for (const stub of libVarStubs) {
-      try {
-        const imported = await figma.variables.importVariableByKeyAsync(stub.key);
-        ingestVariable(imported);
-      } catch (err) {
-        log("warn", `  Import failed for variable "${stub.name}" (key=${stub.key}): ${err}`);
+    // Fire all imports in parallel — eliminates per-variable round-trip latency.
+    const importResults = await Promise.allSettled(
+      libVarStubs.map(stub => figma.variables.importVariableByKeyAsync(stub.key))
+    );
+    for (let i = 0; i < importResults.length; i++) {
+      const result = importResults[i];
+      if (result.status === "fulfilled") {
+        ingestVariable(result.value);
+      } else {
+        log("warn", `  Import failed for variable "${libVarStubs[i].name}" (key=${libVarStubs[i].key}): ${result.reason}`);
       }
     }
   }
@@ -372,34 +379,74 @@ function ingestVariable(v: Variable): void {
 // Phase 2 — Node scanning
 // ---------------------------------------------------------------------------
 
-/** Recursively walk a node tree and return all findings. */
-function scanNode(node: SceneNode): Finding[] {
-  const findings: Finding[] = [];
+/** Count all nodes in a set of roots (iterative, no stack-overflow risk). */
+function countNodes(roots: SceneNode[]): number {
+  let count = 0;
+  const stack: SceneNode[] = [...roots];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    count++;
+    if ("children" in node) {
+      for (const child of (node as ChildrenMixin).children) {
+        stack.push(child);
+      }
+    }
+  }
+  return count;
+}
 
-  log("info", `Scanning node: "${node.name}" (type=${node.type})`);
+/**
+ * Iterative, async scan of all roots.
+ * Yields control back to the plugin sandbox every ~16 ms so the UI spinner
+ * stays responsive on large files, and sends progress messages so the UI
+ * can show a deterministic "X / Y nodes" counter.
+ */
+async function scanAllNodes(roots: SceneNode[]): Promise<Finding[]> {
+  const total = countNodes(roots);
+  figma.ui.postMessage({ type: "progress", phase: "scan", current: 0, total });
 
-  // Only process nodes with an active Auto Layout
-  if (
-    "layoutMode" in node &&
-    node.layoutMode !== "NONE" &&
-    node.layoutMode !== undefined
-  ) {
-    log("info", `  Auto Layout detected (mode=${node.layoutMode})`);
+  const allFindings: Finding[] = [];
+  // Push in reverse so the first root is processed first (stack is LIFO).
+  const stack: SceneNode[] = [...roots].reverse();
+  let scanned = 0;
+  let lastYield = Date.now();
 
-    for (const prop of SPACING_PROPERTIES) {
-      const finding = checkProperty(node as FrameNode | ComponentNode | InstanceNode, prop);
-      if (finding) findings.push(finding);
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+
+    log("info", `Scanning node: "${node.name}" (type=${node.type})`);
+
+    if (
+      "layoutMode" in node &&
+      node.layoutMode !== "NONE" &&
+      node.layoutMode !== undefined
+    ) {
+      log("info", `  Auto Layout detected (mode=${node.layoutMode})`);
+      for (const prop of SPACING_PROPERTIES) {
+        const finding = checkProperty(node as FrameNode | ComponentNode | InstanceNode, prop);
+        if (finding) allFindings.push(finding);
+      }
+    }
+
+    if ("children" in node) {
+      const children = (node as ChildrenMixin).children;
+      for (let i = children.length - 1; i >= 0; i--) {
+        stack.push(children[i]);
+      }
+    }
+
+    scanned++;
+
+    // Yield every ~16 ms (one frame) to keep the UI responsive.
+    if (Date.now() - lastYield >= 16) {
+      figma.ui.postMessage({ type: "progress", phase: "scan", current: scanned, total });
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      lastYield = Date.now();
     }
   }
 
-  // Recurse into children
-  if ("children" in node) {
-    for (const child of (node as ChildrenMixin).children) {
-      findings.push(...scanNode(child));
-    }
-  }
-
-  return findings;
+  figma.ui.postMessage({ type: "progress", phase: "scan", current: scanned, total });
+  return allFindings;
 }
 
 /**
@@ -546,10 +593,7 @@ async function runScan(
     log("info", `Scanning full page (${roots.length} top-level node(s))`);
   }
 
-  const allFindings: Finding[] = [];
-  for (const root of roots) {
-    allFindings.push(...scanNode(root));
-  }
+  const allFindings = await scanAllNodes(roots);
 
   log(
     "info",
