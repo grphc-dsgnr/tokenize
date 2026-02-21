@@ -12,11 +12,14 @@
 //                 { type: 'replace-done', replaced: number, unresolved: number, findings: Finding[] }
 //                 { type: 'debug-log', entries: LogEntry[] }
 //                 { type: 'error', message: string }
-//   ui → plugin:  { type: 'scan', collectionFilter: string, scope: 'selection' | 'page' }
+//                 { type: 'collections-list', local: CollectionInfo[], library: LibraryCollectionInfo[] }
+//   ui → plugin:  { type: 'scan', collectionFilter: string, scope: 'selection' | 'page',
+//                          selectedLocalIds?: string[], selectedLibraryKeys?: string[] }
 //                 { type: 'replace', findings: Finding[] }
+//                 { type: 'get-collections' }
 //                 { type: 'copy-log' }  (handled in ui)
 // =============================================================================
-figma.showUI(__html__, { width: 420, height: 600, title: "Tokenize – Spacing Auditor" });
+figma.showUI(__html__, { width: 420, height: 640, title: "Tokenize – Spacing Auditor" });
 // ---------------------------------------------------------------------------
 // Global debug log accumulator
 // We batch-send entries to the UI after each major phase so the UI stays
@@ -48,11 +51,46 @@ const SPACING_PROPERTIES = [
     "counterAxisSpacing",
 ];
 // ---------------------------------------------------------------------------
+// Collection discovery — for the library picker UI
+// ---------------------------------------------------------------------------
+/**
+ * Fetch all local and library variable collections and return them so the UI
+ * can present a collection picker to the user.
+ */
+async function getAvailableCollections() {
+    const local = [];
+    const library = [];
+    try {
+        const cols = figma.variables.getLocalVariableCollections();
+        for (const c of cols) {
+            local.push({ id: c.id, name: c.name });
+        }
+    }
+    catch (_) {
+        // Non-fatal — return empty list
+    }
+    if (typeof figma.teamLibrary !== "undefined") {
+        try {
+            const libCols = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+            for (const lc of libCols) {
+                library.push({ key: lc.key, name: lc.name, libraryName: lc.libraryName });
+            }
+        }
+        catch (_) {
+            // Non-fatal — return empty list
+        }
+    }
+    return { local, library };
+}
+// ---------------------------------------------------------------------------
 // Phase 1 — Variable discovery & resolution
 // ---------------------------------------------------------------------------
 /**
- * Build a map of  resolved pixel value → Variable  for all spacing variables
- * in collections matching the filter string.
+ * Build a map of  resolved pixel value → Variable  for all spacing variables.
+ *
+ * When the user has explicitly selected collections in the UI, those keys/IDs
+ * are used directly (bypassing the name filter).  If nothing is explicitly
+ * selected the filter string falls back to substring-matching collection names.
  *
  * Strategy (in order):
  *  1. getLocalVariables() — catches local + already-imported library vars.
@@ -60,9 +98,12 @@ const SPACING_PROPERTIES = [
  *     collection list, then imports each variable by key.
  *  3. Surface a clear error if everything fails.
  */
-async function buildValueMap(collectionFilter) {
+async function buildValueMap(collectionFilter, selectedLocalIds = [], selectedLibraryKeys = []) {
     valueToVariableMap = new Map();
-    log("info", `=== Variable Discovery (filter: "${collectionFilter}") ===`);
+    const usingExplicitSelection = selectedLocalIds.length > 0 || selectedLibraryKeys.length > 0;
+    log("info", usingExplicitSelection
+        ? `=== Variable Discovery (explicit selection: ${selectedLocalIds.length} local, ${selectedLibraryKeys.length} library) ===`
+        : `=== Variable Discovery (filter: "${collectionFilter}") ===`);
     // --- Step 1: Local variables (includes already-imported library vars) ---
     let localVars = [];
     try {
@@ -84,17 +125,28 @@ async function buildValueMap(collectionFilter) {
     catch (err) {
         log("warn", `getLocalVariableCollections() failed: ${err}`);
     }
-    // Filter collections by name
-    const filterLower = collectionFilter.toLowerCase();
-    const matchingCollectionIds = new Set(allCollections
-        .filter((c) => c.name.toLowerCase().includes(filterLower))
-        .map((c) => c.id));
-    if (matchingCollectionIds.size === 0) {
-        log("warn", `No local collections matched filter "${collectionFilter}".`);
-        log("warn", `Available collection names: ${allCollections.map((c) => `"${c.name}"`).join(", ") || "(none)"}`);
+    // Determine which local collection IDs to include
+    let matchingCollectionIds;
+    if (usingExplicitSelection && selectedLocalIds.length > 0) {
+        matchingCollectionIds = new Set(selectedLocalIds);
+        log("info", `Using ${selectedLocalIds.length} explicitly selected local collection(s)`);
+    }
+    else if (!usingExplicitSelection) {
+        // Fall back to name filter
+        const filterLower = collectionFilter.toLowerCase();
+        matchingCollectionIds = new Set(allCollections
+            .filter((c) => c.name.toLowerCase().includes(filterLower))
+            .map((c) => c.id));
+        if (matchingCollectionIds.size === 0) {
+            log("warn", `No local collections matched filter "${collectionFilter}".`);
+            log("warn", `Available collection names: ${allCollections.map((c) => `"${c.name}"`).join(", ") || "(none)"}`);
+        }
+        else {
+            log("info", `Matched ${matchingCollectionIds.size} collection(s) by filter "${collectionFilter}"`);
+        }
     }
     else {
-        log("info", `Matched ${matchingCollectionIds.size} collection(s) by filter "${collectionFilter}"`);
+        matchingCollectionIds = new Set();
     }
     // Ingest matched local variables
     for (const v of localVars) {
@@ -129,11 +181,25 @@ async function buildValueMap(collectionFilter) {
         flushLog();
         return;
     }
-    // Filter library collections by name
-    const matchingLibCollections = libCollections.filter((lc) => lc.name.toLowerCase().includes(filterLower));
+    // Determine which library collections to import from
+    let matchingLibCollections;
+    if (usingExplicitSelection && selectedLibraryKeys.length > 0) {
+        const keySet = new Set(selectedLibraryKeys);
+        matchingLibCollections = libCollections.filter((lc) => keySet.has(lc.key));
+        log("info", `Using ${matchingLibCollections.length} explicitly selected library collection(s)`);
+    }
+    else if (!usingExplicitSelection) {
+        const filterLower = collectionFilter.toLowerCase();
+        matchingLibCollections = libCollections.filter((lc) => lc.name.toLowerCase().includes(filterLower));
+    }
+    else {
+        matchingLibCollections = [];
+    }
     if (matchingLibCollections.length === 0) {
-        log("warn", `No library collections matched filter "${collectionFilter}". ` +
-            `Available: ${libCollections.map((c) => `"${c.name}"`).join(", ") || "(none)"}`);
+        log("warn", usingExplicitSelection
+            ? `None of the selected library collections were found. Available: ${libCollections.map((c) => `"${c.name}"`).join(", ") || "(none)"}`
+            : `No library collections matched filter "${collectionFilter}". ` +
+                `Available: ${libCollections.map((c) => `"${c.name}"`).join(", ") || "(none)"}`);
         flushLog();
         return;
     }
@@ -303,10 +369,10 @@ async function applyReplacements(findings) {
 // ---------------------------------------------------------------------------
 // Root scan orchestrator
 // ---------------------------------------------------------------------------
-async function runScan(collectionFilter, scope) {
+async function runScan(collectionFilter, scope, selectedLocalIds = [], selectedLibraryKeys = []) {
     log("info", `=== Scan Started (scope=${scope}) ===`);
     // Build the value→variable map first
-    await buildValueMap(collectionFilter);
+    await buildValueMap(collectionFilter, selectedLocalIds, selectedLibraryKeys);
     // Determine which nodes to scan
     let roots;
     if (scope === "selection") {
@@ -332,14 +398,27 @@ async function runScan(collectionFilter, scope) {
 // ---------------------------------------------------------------------------
 // Message handler
 // ---------------------------------------------------------------------------
+// Send the collection list to the UI as soon as the plugin opens so the
+// picker is populated without the user having to click anything.
+getAvailableCollections().then(({ local, library }) => {
+    figma.ui.postMessage({ type: "collections-list", local, library });
+});
 figma.ui.onmessage = async (msg) => {
-    var _a, _b, _c;
+    var _a, _b, _c, _d, _e;
+    // ---- Collection list request (manual refresh) ----
+    if (msg.type === "get-collections") {
+        const { local, library } = await getAvailableCollections();
+        figma.ui.postMessage({ type: "collections-list", local, library });
+        return;
+    }
     // ---- Scan request ----
     if (msg.type === "scan") {
         const filter = (_a = msg.collectionFilter) !== null && _a !== void 0 ? _a : "spacing";
         const scope = (_b = msg.scope) !== null && _b !== void 0 ? _b : "page";
+        const selectedLocalIds = (_c = msg.selectedLocalIds) !== null && _c !== void 0 ? _c : [];
+        const selectedLibraryKeys = (_d = msg.selectedLibraryKeys) !== null && _d !== void 0 ? _d : [];
         try {
-            const findings = await runScan(filter, scope);
+            const findings = await runScan(filter, scope, selectedLocalIds, selectedLibraryKeys);
             figma.ui.postMessage({ type: "scan-results", findings });
         }
         catch (err) {
@@ -352,7 +431,7 @@ figma.ui.onmessage = async (msg) => {
     }
     // ---- Replace request ----
     if (msg.type === "replace") {
-        const findings = (_c = msg.findings) !== null && _c !== void 0 ? _c : [];
+        const findings = (_e = msg.findings) !== null && _e !== void 0 ? _e : [];
         try {
             const updated = await applyReplacements(findings);
             const replacedCount = updated.filter((f) => f.replaced).length;
