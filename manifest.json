@@ -7,6 +7,6 @@
   "editorType": ["figma"],
   "permissions": ["currentuser", "teamlibrary"],
   "networkAccess": {
-    "allowedDomains": []
+    "allowedDomains": ["none"]
   }
 }
