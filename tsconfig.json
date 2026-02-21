@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["ES2017", "ES2015.Promise"],
+    "strict": true,
+    "moduleResolution": "node",
+    "noEmitOnError": true,
+    "skipLibCheck": true
+  },
+  "files": [
+    "code.ts",
+    "node_modules/@figma/plugin-typings/index.d.ts"
+  ]
+}

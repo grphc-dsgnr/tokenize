@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tokenize – Spacing Auditor</title>
+<style>
+  /* =========================================================
+     Reset & base
+     ========================================================= */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:           #1e1e1e;
+    --surface:      #2a2a2a;
+    --surface-2:    #333333;
+    --border:       #404040;
+    --text:         #e8e8e8;
+    --text-muted:   #888;
+    --accent:       #7c6af5;
+    --accent-hover: #9083f7;
+    --green:        #4ade80;
+    --yellow:       #facc15;
+    --red:          #f87171;
+    --radius:       6px;
+    --font:         -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono:         "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  }
+
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 12px;
+    line-height: 1.5;
+    height: 100%;
+  }
+
+  /* =========================================================
+     Layout wrapper
+     ========================================================= */
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* =========================================================
+     Header
+     ========================================================= */
+  #header {
+    padding: 12px 14px 8px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  #header h1 {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: .02em;
+    color: var(--text);
+  }
+
+  #header p {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-top: 2px;
+  }
+
+  /* =========================================================
+     Scrollable main area
+     ========================================================= */
+  #main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  /* =========================================================
+     Form controls
+     ========================================================= */
+  .field-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    display: block;
+  }
+
+  input[type="text"] {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 12px;
+    padding: 6px 8px;
+    outline: none;
+    transition: border-color .15s;
+  }
+  input[type="text"]:focus { border-color: var(--accent); }
+
+  /* Scope toggle */
+  .toggle-group {
+    display: flex;
+    gap: 4px;
+  }
+  .toggle-btn {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-muted);
+    font-family: var(--font);
+    font-size: 12px;
+    padding: 6px 0;
+    cursor: pointer;
+    text-align: center;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .toggle-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  /* Primary / secondary buttons */
+  .btn {
+    width: 100%;
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    font-family: var(--font);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: background .15s, opacity .15s;
+  }
+  .btn:disabled { opacity: .4; cursor: default; }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:not(:disabled):hover { background: var(--accent-hover); }
+  .btn-secondary {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:not(:disabled):hover { background: var(--border); }
+
+  /* =========================================================
+     Results area
+     ========================================================= */
+  #results-section { display: none; }
+
+  .results-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .results-header span {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  #findings-list {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    max-height: 200px;
+    overflow-y: auto;
+    margin-bottom: 8px;
+  }
+
+  /* Individual finding row */
+  .finding-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 6px;
+    align-items: center;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+  }
+  .finding-row:last-child { border-bottom: none; }
+  .finding-row.replaced { opacity: .45; }
+
+  .finding-info {}
+  .finding-node {
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 160px;
+  }
+  .finding-prop {
+    color: var(--text-muted);
+    font-size: 10px;
+  }
+
+  .finding-value {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .finding-token {
+    font-size: 10px;
+    white-space: nowrap;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: right;
+  }
+  .finding-token.matched { color: var(--green); }
+  .finding-token.unmatched { color: var(--red); }
+  .finding-token.done { color: var(--text-muted); }
+
+  /* Summary bar */
+  #summary {
+    display: none;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+    font-size: 11px;
+  }
+  #summary .stat { display: inline-flex; gap: 4px; margin-right: 12px; }
+  #summary .stat .num { font-weight: 700; }
+  #summary .stat.good .num { color: var(--green); }
+  #summary .stat.warn .num { color: var(--yellow); }
+
+  /* Unresolved list */
+  #unresolved-section { display: none; }
+  #unresolved-list {
+    background: var(--surface);
+    border: 1px solid #5a3030;
+    border-radius: var(--radius);
+    padding: 6px 8px;
+    font-size: 11px;
+    color: var(--red);
+    max-height: 80px;
+    overflow-y: auto;
+  }
+  .unresolved-item {
+    padding: 2px 0;
+    border-bottom: 1px solid #3a2020;
+  }
+  .unresolved-item:last-child { border-bottom: none; }
+
+  /* Error banner */
+  #error-banner {
+    display: none;
+    background: #3a1a1a;
+    border: 1px solid var(--red);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+    color: var(--red);
+    font-size: 11px;
+  }
+
+  /* Loading indicator */
+  #loading {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* =========================================================
+     Debug panel (collapsible)
+     ========================================================= */
+  #debug-section {
+    flex-shrink: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  #debug-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--surface);
+    transition: background .1s;
+  }
+  #debug-toggle:hover { background: var(--surface-2); }
+
+  #debug-toggle .chevron {
+    font-size: 10px;
+    transition: transform .2s;
+  }
+  #debug-toggle.open .chevron { transform: rotate(180deg); }
+
+  #debug-panel {
+    display: none;
+    flex-direction: column;
+    height: 180px;
+    background: #141414;
+  }
+  #debug-panel.open { display: flex; }
+
+  #debug-toolbar {
+    display: flex;
+    gap: 6px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .debug-btn {
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-family: var(--font);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background .1s;
+  }
+  .debug-btn:hover { background: var(--border); color: var(--text); }
+
+  #debug-log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 10px;
+    font-family: var(--mono);
+    font-size: 10px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  /* Log entry colors */
+  .log-info    { color: #777; }
+  .log-warn    { color: var(--yellow); }
+  .log-error   { color: var(--red); }
+  .log-success { color: var(--green); }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ======================================================
+       Header
+       ====================================================== -->
+  <div id="header">
+    <h1>Tokenize — Spacing Auditor</h1>
+    <p>Replace hardcoded Auto Layout spacing with design tokens</p>
+  </div>
+
+  <!-- ======================================================
+       Scrollable main content
+       ====================================================== -->
+  <div id="main">
+
+    <!-- Collection filter -->
+    <div>
+      <label class="field-label" for="collection-filter">Variable collection filter</label>
+      <input
+        type="text"
+        id="collection-filter"
+        value="spacing"
+        placeholder="e.g. spacing, foundation…"
+        spellcheck="false"
+      />
+    </div>
+
+    <!-- Scope selector -->
+    <div>
+      <label class="field-label">Scan scope</label>
+      <div class="toggle-group">
+        <button class="toggle-btn active" data-scope="selection" id="btn-selection">Selection</button>
+        <button class="toggle-btn"        data-scope="page"      id="btn-page">Full Page</button>
+      </div>
+    </div>
+
+    <!-- Scan button + loading indicator -->
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button class="btn btn-primary" id="btn-scan" style="flex:1">Scan</button>
+      <div id="loading"><div class="spinner"></div> <span id="loading-label">Scanning…</span></div>
+    </div>
+
+    <!-- Error banner -->
+    <div id="error-banner"></div>
+
+    <!-- Results preview -->
+    <div id="results-section">
+      <div class="results-header">
+        <span id="results-label">0 hardcoded values found</span>
+      </div>
+      <div id="findings-list"></div>
+
+      <!-- Replace button -->
+      <button class="btn btn-primary" id="btn-replace" disabled>Replace All Matched</button>
+    </div>
+
+    <!-- Summary after replacement -->
+    <div id="summary">
+      <span class="stat good"><span class="num" id="stat-replaced">0</span> replaced</span>
+      <span class="stat warn"><span class="num" id="stat-unresolved">0</span> unresolved</span>
+    </div>
+
+    <!-- Unresolved list -->
+    <div id="unresolved-section">
+      <label class="field-label" style="margin-bottom:4px; color: var(--red)">
+        Unresolved — no matching token found
+      </label>
+      <div id="unresolved-list"></div>
+    </div>
+
+  </div><!-- /#main -->
+
+  <!-- ======================================================
+       Debug panel (sticky at bottom)
+       ====================================================== -->
+  <div id="debug-section">
+    <div id="debug-toggle" onclick="toggleDebug()">
+      <span>Debug Panel</span>
+      <span class="chevron">▾</span>
+    </div>
+    <div id="debug-panel">
+      <div id="debug-toolbar">
+        <button class="debug-btn" onclick="copyLog()">Copy Log</button>
+        <button class="debug-btn" onclick="clearLog()">Clear</button>
+        <span id="log-count" style="margin-left:auto; font-size:10px; color:#555; font-family: var(--mono)">0 entries</span>
+      </div>
+      <div id="debug-log" aria-live="polite"></div>
+    </div>
+  </div>
+
+</div><!-- /#app -->
+
+<script>
+// =============================================================================
+// UI script — vanilla JS, no frameworks
+// =============================================================================
+
+// ---- State ------------------------------------------------------------------
+let currentScope = "selection";
+let scanFindings = [];   // Finding[] from the last scan
+let fullLogText  = "";   // Plain-text accumulator for "Copy Log"
+
+// ---- Element refs -----------------------------------------------------------
+const elFilter      = document.getElementById("collection-filter");
+const elBtnScan     = document.getElementById("btn-scan");
+const elBtnReplace  = document.getElementById("btn-replace");
+const elLoading     = document.getElementById("loading");
+const elLoadingLbl  = document.getElementById("loading-label");
+const elResults     = document.getElementById("results-section");
+const elResultsLbl  = document.getElementById("results-label");
+const elFindingsList= document.getElementById("findings-list");
+const elSummary     = document.getElementById("summary");
+const elStatReplaced= document.getElementById("stat-replaced");
+const elStatUnresolved = document.getElementById("stat-unresolved");
+const elUnresolvedSec = document.getElementById("unresolved-section");
+const elUnresolvedList = document.getElementById("unresolved-list");
+const elErrorBanner = document.getElementById("error-banner");
+const elDebugLog    = document.getElementById("debug-log");
+const elLogCount    = document.getElementById("log-count");
+const elDebugToggle = document.getElementById("debug-toggle");
+const elDebugPanel  = document.getElementById("debug-panel");
+
+// ---- Scope toggle -----------------------------------------------------------
+document.querySelectorAll(".toggle-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".toggle-btn").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentScope = btn.dataset.scope;
+  });
+});
+
+// ---- Scan -------------------------------------------------------------------
+elBtnScan.addEventListener("click", () => {
+  const filter = elFilter.value.trim() || "spacing";
+  clearError();
+  setLoading(true, "Scanning…");
+  hideSummary();
+  hideUnresolved();
+  elResults.style.display = "none";
+  elBtnReplace.disabled = true;
+  scanFindings = [];
+
+  parent.postMessage({
+    pluginMessage: { type: "scan", collectionFilter: filter, scope: currentScope }
+  }, "*");
+});
+
+// ---- Replace ----------------------------------------------------------------
+elBtnReplace.addEventListener("click", () => {
+  if (!scanFindings.length) return;
+  setLoading(true, "Replacing…");
+  elBtnReplace.disabled = true;
+
+  parent.postMessage({
+    pluginMessage: { type: "replace", findings: scanFindings }
+  }, "*");
+});
+
+// ---- Message handler --------------------------------------------------------
+window.onmessage = (event) => {
+  const msg = event.data.pluginMessage;
+  if (!msg) return;
+
+  if (msg.type === "scan-results") {
+    setLoading(false);
+    scanFindings = msg.findings || [];
+    renderFindings(scanFindings);
+  }
+
+  if (msg.type === "replace-done") {
+    setLoading(false);
+    scanFindings = msg.findings || [];
+    renderFindings(scanFindings);
+    showSummary(msg.replaced, msg.unresolved, scanFindings);
+  }
+
+  if (msg.type === "debug-log") {
+    appendLogEntries(msg.entries || []);
+  }
+
+  if (msg.type === "error") {
+    setLoading(false);
+    showError(msg.message);
+  }
+};
+
+// ---- Render findings --------------------------------------------------------
+function renderFindings(findings) {
+  elFindingsList.innerHTML = "";
+  elResults.style.display = "block";
+
+  if (findings.length === 0) {
+    elResultsLbl.textContent = "No hardcoded spacing values found 🎉";
+    elBtnReplace.disabled = true;
+    elFindingsList.innerHTML =
+      `<div style="padding:12px; text-align:center; color:var(--text-muted)">Nothing to replace</div>`;
+    return;
+  }
+
+  const matched   = findings.filter((f) => f.matchedVariableId && !f.replaced).length;
+  const replaced  = findings.filter((f) => f.replaced).length;
+  const unmatched = findings.filter((f) => !f.matchedVariableId && !f.replaced).length;
+
+  elResultsLbl.textContent =
+    `${findings.length} hardcoded value${findings.length !== 1 ? "s" : ""} — ` +
+    `${matched} matched, ${unmatched} unresolved, ${replaced} replaced`;
+
+  for (const f of findings) {
+    const row = document.createElement("div");
+    row.className = "finding-row" + (f.replaced ? " replaced" : "");
+
+    // Info column
+    const info = document.createElement("div");
+    info.className = "finding-info";
+
+    const nodeName = document.createElement("div");
+    nodeName.className = "finding-node";
+    nodeName.textContent = f.nodeName;
+    nodeName.title = f.nodeName;
+
+    const propSpan = document.createElement("div");
+    propSpan.className = "finding-prop";
+    propSpan.textContent = f.property;
+
+    info.appendChild(nodeName);
+    info.appendChild(propSpan);
+
+    // Value column
+    const val = document.createElement("div");
+    val.className = "finding-value";
+    val.textContent = f.rawValue + "px";
+
+    // Token column
+    const tok = document.createElement("div");
+    tok.className = "finding-token";
+    if (f.replaced) {
+      tok.className += " done";
+      tok.textContent = "✓ " + (f.matchedVariableName || "replaced");
+    } else if (f.matchedVariableName) {
+      tok.className += " matched";
+      tok.textContent = f.matchedVariableName;
+      tok.title = f.matchedVariableName;
+    } else {
+      tok.className += " unmatched";
+      tok.textContent = "No match";
+    }
+
+    row.appendChild(info);
+    row.appendChild(val);
+    row.appendChild(tok);
+    elFindingsList.appendChild(row);
+  }
+
+  // Enable Replace All if there are any matched (un-replaced) findings
+  elBtnReplace.disabled = matched === 0;
+}
+
+// ---- Summary ----------------------------------------------------------------
+function showSummary(replaced, unresolved, findings) {
+  elSummary.style.display = "block";
+  elStatReplaced.textContent   = replaced;
+  elStatUnresolved.textContent = unresolved;
+
+  // Show unresolved list if any
+  const unresolvedFindings = findings.filter((f) => !f.matchedVariableId && !f.replaced);
+  if (unresolvedFindings.length > 0) {
+    elUnresolvedSec.style.display = "block";
+    elUnresolvedList.innerHTML = "";
+    for (const f of unresolvedFindings) {
+      const item = document.createElement("div");
+      item.className = "unresolved-item";
+      item.textContent = `${f.nodeName} — ${f.property}: ${f.rawValue}px`;
+      elUnresolvedList.appendChild(item);
+    }
+  }
+}
+
+function hideSummary() {
+  elSummary.style.display = "none";
+}
+
+function hideUnresolved() {
+  elUnresolvedSec.style.display = "none";
+  elUnresolvedList.innerHTML = "";
+}
+
+// ---- Error ------------------------------------------------------------------
+function showError(message) {
+  elErrorBanner.textContent = "⚠ " + message;
+  elErrorBanner.style.display = "block";
+}
+function clearError() {
+  elErrorBanner.style.display = "none";
+  elErrorBanner.textContent  = "";
+}
+
+// ---- Loading ----------------------------------------------------------------
+function setLoading(on, label) {
+  elLoading.style.display   = on ? "flex" : "none";
+  elBtnScan.disabled        = on;
+  if (label) elLoadingLbl.textContent = label;
+}
+
+// ---- Debug panel ------------------------------------------------------------
+function toggleDebug() {
+  const isOpen = elDebugToggle.classList.toggle("open");
+  if (isOpen) {
+    elDebugPanel.classList.add("open");
+  } else {
+    elDebugPanel.classList.remove("open");
+  }
+}
+
+/**
+ * Append new LogEntry objects to the debug log textarea.
+ * @param {Array<{level: string, message: string, timestamp: number}>} entries
+ */
+function appendLogEntries(entries) {
+  // We replace the entire log content each time because the plugin sends the
+  // full accumulated log on every flush. This keeps display in sync.
+  elDebugLog.innerHTML = "";
+  fullLogText = "";
+
+  for (const entry of entries) {
+    const line = document.createElement("div");
+    const ts = new Date(entry.timestamp).toISOString().substr(11, 12);
+    const text = `[${ts}] ${entry.message}`;
+
+    line.className = "log-" + entry.level;
+    line.textContent = text;
+    elDebugLog.appendChild(line);
+    fullLogText += text + "\n";
+  }
+
+  elLogCount.textContent = entries.length + " entries";
+
+  // Auto-scroll to bottom
+  elDebugLog.scrollTop = elDebugLog.scrollHeight;
+}
+
+function copyLog() {
+  if (!fullLogText) return;
+  try {
+    navigator.clipboard.writeText(fullLogText).then(() => {
+      const orig = elLogCount.textContent;
+      elLogCount.textContent = "Copied!";
+      setTimeout(() => { elLogCount.textContent = orig; }, 1500);
+    });
+  } catch (_) {
+    // Fallback: create a textarea and execCommand
+    const ta = document.createElement("textarea");
+    ta.value = fullLogText;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    const orig = elLogCount.textContent;
+    elLogCount.textContent = "Copied!";
+    setTimeout(() => { elLogCount.textContent = orig; }, 1500);
+  }
+}
+
+function clearLog() {
+  elDebugLog.innerHTML = "";
+  fullLogText = "";
+  elLogCount.textContent = "0 entries";
+}
+</script>
+</body>
+</html>

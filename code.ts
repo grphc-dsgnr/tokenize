@@ -1,0 +1,516 @@
+// =============================================================================
+// Tokenize — Auto Layout Spacing Auditor
+// Figma Plugin: code.ts (runs in the plugin sandbox)
+// =============================================================================
+//
+// This plugin scans Auto Layout nodes for hardcoded spacing values and replaces
+// them with matching variables from the linked foundation design system library.
+//
+// Message protocol (plugin ↔ UI):
+//   plugin → ui:  { type: 'scan-results', findings: Finding[] }
+//                 { type: 'replace-done', replaced: number, unresolved: number, findings: Finding[] }
+//                 { type: 'debug-log', entries: LogEntry[] }
+//                 { type: 'error', message: string }
+//   ui → plugin:  { type: 'scan', collectionFilter: string, scope: 'selection' | 'page' }
+//                 { type: 'replace', findings: Finding[] }
+//                 { type: 'copy-log' }  (handled in ui)
+// =============================================================================
+
+figma.showUI(__html__, { width: 420, height: 600, title: "Tokenize – Spacing Auditor" });
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** The spacing CSS-like properties we audit on Auto Layout nodes. */
+type SpacingProperty =
+  | "itemSpacing"
+  | "paddingTop"
+  | "paddingBottom"
+  | "paddingLeft"
+  | "paddingRight"
+  | "counterAxisSpacing";
+
+/** A single finding: one property on one node that has a hardcoded value. */
+interface Finding {
+  nodeId: string;
+  nodeName: string;
+  property: SpacingProperty;
+  rawValue: number;
+  /** Variable id if a match was found, otherwise null. */
+  matchedVariableId: string | null;
+  /** Human-readable variable name for display. */
+  matchedVariableName: string | null;
+  /** Already replaced in this session? */
+  replaced: boolean;
+}
+
+/** A log entry for the debug panel. */
+interface LogEntry {
+  level: "info" | "warn" | "error" | "success";
+  message: string;
+  timestamp: number;
+}
+
+// ---------------------------------------------------------------------------
+// Global debug log accumulator
+// We batch-send entries to the UI after each major phase so the UI stays
+// responsive rather than receiving one message per log line.
+// ---------------------------------------------------------------------------
+
+const debugLog: LogEntry[] = [];
+
+function log(level: LogEntry["level"], message: string): void {
+  const entry: LogEntry = { level, message, timestamp: Date.now() };
+  debugLog.push(entry);
+  console.log(`[${level.toUpperCase()}] ${message}`);
+}
+
+function flushLog(): void {
+  figma.ui.postMessage({ type: "debug-log", entries: [...debugLog] });
+  // Keep the accumulator so the UI can display the full history after a
+  // subsequent flush, but trim very long logs to avoid memory issues.
+  if (debugLog.length > 2000) debugLog.splice(0, debugLog.length - 2000);
+}
+
+// ---------------------------------------------------------------------------
+// Resolved variable cache
+// Maps numeric value → Variable (scoped to the current run so stale imports
+// from a previous run are not used).
+// ---------------------------------------------------------------------------
+
+interface ResolvedVar {
+  variable: Variable;
+  name: string;
+}
+
+let valueToVariableMap: Map<number, ResolvedVar> = new Map();
+
+// ---------------------------------------------------------------------------
+// All spacing properties we check on each Auto Layout node
+// ---------------------------------------------------------------------------
+
+const SPACING_PROPERTIES: SpacingProperty[] = [
+  "itemSpacing",
+  "paddingTop",
+  "paddingBottom",
+  "paddingLeft",
+  "paddingRight",
+  "counterAxisSpacing",
+];
+
+// ---------------------------------------------------------------------------
+// Phase 1 — Variable discovery & resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a map of  resolved pixel value → Variable  for all spacing variables
+ * in collections matching the filter string.
+ *
+ * Strategy (in order):
+ *  1. getLocalVariables() — catches local + already-imported library vars.
+ *  2. getAvailableLibraryVariableCollectionsAsync() — fetches remote library
+ *     collection list, then imports each variable by key.
+ *  3. Surface a clear error if everything fails.
+ */
+async function buildValueMap(collectionFilter: string): Promise<void> {
+  valueToVariableMap = new Map();
+
+  log("info", `=== Variable Discovery (filter: "${collectionFilter}") ===`);
+
+  // --- Step 1: Local variables (includes already-imported library vars) ---
+  let localVars: Variable[] = [];
+  try {
+    localVars = figma.variables.getLocalVariables("FLOAT");
+    log("info", `getLocalVariables() returned ${localVars.length} FLOAT variables`);
+  } catch (err) {
+    log("warn", `getLocalVariables() failed: ${err}`);
+  }
+
+  // Identify all collections to show the user what's available
+  let allCollections: VariableCollection[] = [];
+  try {
+    allCollections = figma.variables.getLocalVariableCollections();
+    log("info", `Found ${allCollections.length} local collection(s):`);
+    for (const col of allCollections) {
+      log("info", `  • "${col.name}" (id=${col.id}, remote=${col.remote})`);
+    }
+  } catch (err) {
+    log("warn", `getLocalVariableCollections() failed: ${err}`);
+  }
+
+  // Filter collections by name
+  const filterLower = collectionFilter.toLowerCase();
+  const matchingCollectionIds = new Set(
+    allCollections
+      .filter((c) => c.name.toLowerCase().includes(filterLower))
+      .map((c) => c.id)
+  );
+
+  if (matchingCollectionIds.size === 0) {
+    log("warn", `No local collections matched filter "${collectionFilter}".`);
+    log(
+      "warn",
+      `Available collection names: ${allCollections.map((c) => `"${c.name}"`).join(", ") || "(none)"}`
+    );
+  } else {
+    log(
+      "info",
+      `Matched ${matchingCollectionIds.size} collection(s) by filter "${collectionFilter}"`
+    );
+  }
+
+  // Ingest matched local variables
+  for (const v of localVars) {
+    if (!matchingCollectionIds.has(v.variableCollectionId)) continue;
+    ingestVariable(v);
+  }
+
+  log(
+    "info",
+    `After local pass: ${valueToVariableMap.size} unique spacing value(s) mapped`
+  );
+
+  // If we already have a good map, skip the library import pass (faster).
+  if (valueToVariableMap.size > 0) {
+    flushLog();
+    return;
+  }
+
+  // --- Step 2: Team library collections ---
+  log("info", "No local spacing variables found — attempting library import...");
+
+  // Guard: teamLibrary may not exist in older API versions.
+  if (typeof figma.teamLibrary === "undefined") {
+    log("warn", "figma.teamLibrary is undefined (older plugin API). Cannot fetch remote libraries.");
+    flushLog();
+    return;
+  }
+
+  let libCollections: LibraryVariableCollection[] = [];
+  try {
+    libCollections = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+    log("info", `getAvailableLibraryVariableCollectionsAsync() returned ${libCollections.length} collection(s):`);
+    for (const lc of libCollections) {
+      log("info", `  • "${lc.name}" (libraryName="${lc.libraryName}", key=${lc.key})`);
+    }
+  } catch (err) {
+    log("error", `getAvailableLibraryVariableCollectionsAsync() failed: ${err}`);
+    flushLog();
+    return;
+  }
+
+  // Filter library collections by name
+  const matchingLibCollections = libCollections.filter((lc) =>
+    lc.name.toLowerCase().includes(filterLower)
+  );
+
+  if (matchingLibCollections.length === 0) {
+    log(
+      "warn",
+      `No library collections matched filter "${collectionFilter}". ` +
+        `Available: ${libCollections.map((c) => `"${c.name}"`).join(", ") || "(none)"}`
+    );
+    flushLog();
+    return;
+  }
+
+  log(
+    "info",
+    `Matched ${matchingLibCollections.length} library collection(s). Importing variables...`
+  );
+
+  // --- Step 3: Import individual variables from matched library collections ---
+  for (const libCol of matchingLibCollections) {
+    log("info", `  Fetching variable list from "${libCol.name}" (${libCol.libraryName})...`);
+
+    let libVarStubs: LibraryVariable[] = [];
+    try {
+      libVarStubs = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(libCol.key);
+      log("info", `  Found ${libVarStubs.length} variable(s) in this collection`);
+    } catch (err) {
+      log("error", `  getVariablesInLibraryCollectionAsync failed for "${libCol.name}": ${err}`);
+      continue;
+    }
+
+    for (const stub of libVarStubs) {
+      try {
+        const imported = await figma.variables.importVariableByKeyAsync(stub.key);
+        ingestVariable(imported);
+      } catch (err) {
+        log("warn", `  Import failed for variable "${stub.name}" (key=${stub.key}): ${err}`);
+      }
+    }
+  }
+
+  log(
+    "info",
+    `After library import pass: ${valueToVariableMap.size} unique spacing value(s) mapped`
+  );
+  flushLog();
+}
+
+/**
+ * Attempt to read the resolved numeric value from a Variable and register it
+ * in the value→variable map.
+ */
+function ingestVariable(v: Variable): void {
+  if (v.resolvedType !== "FLOAT") return;
+
+  const modeKeys = Object.keys(v.valuesByMode);
+  if (modeKeys.length === 0) {
+    log("warn", `Variable "${v.name}" has no valuesByMode entries`);
+    return;
+  }
+
+  // Use the first available mode key (callers can refine this if needed).
+  const modeKey = modeKeys[0];
+  const raw = v.valuesByMode[modeKey];
+
+  log(
+    "info",
+    `  Ingesting var "${v.name}" | id=${v.id} | mode=${modeKey} | valuesByMode[mode]=${raw}`
+  );
+
+  if (typeof raw !== "number") {
+    log("warn", `  Skipping "${v.name}" — resolved value is not a number (got ${typeof raw})`);
+    return;
+  }
+
+  // Only override if not already set (first-match wins, keeps it deterministic)
+  if (!valueToVariableMap.has(raw)) {
+    valueToVariableMap.set(raw, { variable: v, name: v.name });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Node scanning
+// ---------------------------------------------------------------------------
+
+/** Recursively walk a node tree and return all findings. */
+function scanNode(node: SceneNode): Finding[] {
+  const findings: Finding[] = [];
+
+  log("info", `Scanning node: "${node.name}" (type=${node.type})`);
+
+  // Only process nodes with an active Auto Layout
+  if (
+    "layoutMode" in node &&
+    node.layoutMode !== "NONE" &&
+    node.layoutMode !== undefined
+  ) {
+    log("info", `  Auto Layout detected (mode=${node.layoutMode})`);
+
+    for (const prop of SPACING_PROPERTIES) {
+      const finding = checkProperty(node as FrameNode | ComponentNode | InstanceNode, prop);
+      if (finding) findings.push(finding);
+    }
+  }
+
+  // Recurse into children
+  if ("children" in node) {
+    for (const child of (node as ChildrenMixin).children) {
+      findings.push(...scanNode(child));
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Check one spacing property on one node.
+ * Returns a Finding if the value is hardcoded (not already variable-bound),
+ * or null if the property is already tokenized or not applicable.
+ */
+function checkProperty(
+  node: FrameNode | ComponentNode | InstanceNode,
+  prop: SpacingProperty
+): Finding | null {
+  // counterAxisSpacing only exists when counterAxisAlignItems is 'BASELINE'
+  // or when wrapping is enabled — it may be absent; guard with a type check.
+  // Cast through unknown to safely read an arbitrary property by string key.
+  const rawValue: unknown = (node as unknown as Record<string, unknown>)[prop];
+  if (typeof rawValue !== "number") {
+    log("info", `    ${prop}: not present or not a number, skipping`);
+    return null;
+  }
+
+  // Check if already bound to a variable
+  const boundVars = node.boundVariables as Record<string, VariableAlias | undefined> | undefined;
+  const alreadyBound = boundVars && prop in boundVars && boundVars[prop] !== undefined;
+
+  if (alreadyBound) {
+    log("info", `    ${prop}: ${rawValue} — already bound to variable, skipping`);
+    return null;
+  }
+
+  log("info", `    ${prop}: ${rawValue} — hardcoded, checking for match...`);
+
+  // Look up in our value map
+  const match = valueToVariableMap.get(rawValue);
+
+  if (match) {
+    log("success", `    Match found: ${prop}=${rawValue} → "${match.name}"`);
+  } else {
+    const candidates = [...valueToVariableMap.keys()].sort((a, b) => a - b).join(", ");
+    log("warn", `    No match for ${prop}=${rawValue}. Available values: [${candidates || "none"}]`);
+  }
+
+  return {
+    nodeId: node.id,
+    nodeName: node.name,
+    property: prop,
+    rawValue,
+    matchedVariableId: match ? match.variable.id : null,
+    matchedVariableName: match ? match.name : null,
+    replaced: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Replacement
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply variable bindings for all findings that have a matched variable.
+ * Returns the updated findings array (with replaced flags set).
+ */
+async function applyReplacements(findings: Finding[]): Promise<Finding[]> {
+  log("info", "=== Applying Replacements ===");
+
+  let replaced = 0;
+  let skipped = 0;
+
+  for (const finding of findings) {
+    if (!finding.matchedVariableId) {
+      skipped++;
+      continue;
+    }
+
+    const node = await figma.getNodeByIdAsync(finding.nodeId);
+    if (!node) {
+      log("error", `Node "${finding.nodeName}" (id=${finding.nodeId}) not found — may have been deleted`);
+      skipped++;
+      continue;
+    }
+
+    // Retrieve the variable (may be local or already imported)
+    const variable = figma.variables.getVariableById(finding.matchedVariableId);
+    if (!variable) {
+      log("error", `Variable id=${finding.matchedVariableId} not found for "${finding.nodeName}.${finding.property}"`);
+      skipped++;
+      continue;
+    }
+
+    log(
+      "info",
+      `setBoundVariable(node="${finding.nodeName}", prop=${finding.property}, var="${variable.name}")`
+    );
+
+    try {
+      (node as FrameNode).setBoundVariable(finding.property as VariableBindableNodeField, variable);
+      log("success", `  ✓ Bound ${finding.property} on "${finding.nodeName}" → "${variable.name}"`);
+      finding.replaced = true;
+      replaced++;
+    } catch (err) {
+      log("error", `  ✗ setBoundVariable failed for "${finding.nodeName}.${finding.property}": ${err}`);
+      skipped++;
+    }
+  }
+
+  log("info", `Replacement complete: ${replaced} replaced, ${skipped} skipped/unresolved`);
+  flushLog();
+  return findings;
+}
+
+// ---------------------------------------------------------------------------
+// Root scan orchestrator
+// ---------------------------------------------------------------------------
+
+async function runScan(collectionFilter: string, scope: "selection" | "page"): Promise<Finding[]> {
+  log("info", `=== Scan Started (scope=${scope}) ===`);
+
+  // Build the value→variable map first
+  await buildValueMap(collectionFilter);
+
+  // Determine which nodes to scan
+  let roots: SceneNode[];
+  if (scope === "selection") {
+    roots = figma.currentPage.selection.length > 0
+      ? [...figma.currentPage.selection]
+      : [...figma.currentPage.children]; // Fall back to page if nothing selected
+    log(
+      "info",
+      figma.currentPage.selection.length > 0
+        ? `Scanning ${roots.length} selected node(s)`
+        : "Nothing selected — scanning full page"
+    );
+  } else {
+    roots = [...figma.currentPage.children];
+    log("info", `Scanning full page (${roots.length} top-level node(s))`);
+  }
+
+  const allFindings: Finding[] = [];
+  for (const root of roots) {
+    allFindings.push(...scanNode(root));
+  }
+
+  log(
+    "info",
+    `Scan complete: ${allFindings.length} hardcoded spacing propert${allFindings.length === 1 ? "y" : "ies"} found`
+  );
+  flushLog();
+
+  return allFindings;
+}
+
+// ---------------------------------------------------------------------------
+// Message handler
+// ---------------------------------------------------------------------------
+
+figma.ui.onmessage = async (msg: {
+  type: string;
+  collectionFilter?: string;
+  scope?: "selection" | "page";
+  findings?: Finding[];
+}) => {
+  // ---- Scan request ----
+  if (msg.type === "scan") {
+    const filter = msg.collectionFilter ?? "spacing";
+    const scope = msg.scope ?? "page";
+
+    try {
+      const findings = await runScan(filter, scope);
+      figma.ui.postMessage({ type: "scan-results", findings });
+    } catch (err) {
+      const errMsg = `Scan failed: ${err}`;
+      log("error", errMsg);
+      flushLog();
+      figma.ui.postMessage({ type: "error", message: errMsg });
+    }
+    return;
+  }
+
+  // ---- Replace request ----
+  if (msg.type === "replace") {
+    const findings: Finding[] = msg.findings ?? [];
+
+    try {
+      const updated = await applyReplacements(findings);
+      const replacedCount = updated.filter((f) => f.replaced).length;
+      const unresolvedCount = updated.filter((f) => !f.replaced).length;
+      figma.ui.postMessage({
+        type: "replace-done",
+        replaced: replacedCount,
+        unresolved: unresolvedCount,
+        findings: updated,
+      });
+    } catch (err) {
+      const errMsg = `Replace failed: ${err}`;
+      log("error", errMsg);
+      flushLog();
+      figma.ui.postMessage({ type: "error", message: errMsg });
+    }
+    return;
+  }
+};
