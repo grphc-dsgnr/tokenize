@@ -377,4 +377,13 @@ figma.ui.onmessage = async (msg) => {
         }
         return;
     }
+    // ---- Select node request ----
+    if (msg.type === "select-node" && msg.nodeId) {
+        const node = figma.getNodeById(msg.nodeId);
+        if (node && node.type !== "DOCUMENT" && node.type !== "PAGE") {
+            figma.currentPage.selection = [node];
+            figma.viewport.scrollAndZoomIntoView([node]);
+        }
+        return;
+    }
 };
