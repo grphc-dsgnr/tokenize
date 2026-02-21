@@ -335,6 +335,12 @@ function checkProperty(
     return null;
   }
 
+  // A spacing of 0 is intentional and has no meaningful token to match against.
+  if (rawValue === 0) {
+    log("info", `    ${prop}: 0 — zero spacing, skipping token match`);
+    return null;
+  }
+
   // Check if already bound to a variable
   const boundVars = node.boundVariables as Record<string, VariableAlias | undefined> | undefined;
   const alreadyBound = boundVars && prop in boundVars && boundVars[prop] !== undefined;
