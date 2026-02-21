@@ -722,7 +722,7 @@ elBtnScan.addEventListener("click", () => {
   const filter = elFilter.value.trim() || "spacing";
   const { localIds, libraryKeys } = getSelectedCollectionIds();
   clearError();
-  setLoading(true, "Scanning…");
+  setLoading(true, "Starting scan\u2026");
   hideSummary();
   hideUnresolved();
   elResults.style.display = "none";
@@ -759,6 +759,15 @@ window.onmessage = (event) => {
   if (msg.type === "collections-list") {
     elBtnRefresh.disabled = false;
     renderCollections(msg.local || [], msg.library || []);
+  }
+
+  if (msg.type === "progress") {
+    if (msg.phase === "tokens") {
+      elLoadingLbl.textContent = "Building token map\u2026";
+    } else if (msg.phase === "scan" && msg.total > 0) {
+      const pct = Math.round((msg.current / msg.total) * 100);
+      elLoadingLbl.textContent = `Scanning\u2026 ${msg.current} / ${msg.total} (${pct}%)`;
+    }
   }
 
   if (msg.type === "scan-results") {

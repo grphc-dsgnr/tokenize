@@ -13,6 +13,7 @@
 //                 { type: 'debug-log', entries: LogEntry[] }
 //                 { type: 'error', message: string }
 //                 { type: 'collections-list', local: CollectionInfo[], library: LibraryCollectionInfo[] }
+//                 { type: 'progress', phase: 'tokens' | 'scan', current?: number, total?: number }
 //   ui → plugin:  { type: 'scan', collectionFilter: string, scope: 'selection' | 'page',
 //                          selectedLocalIds?: string[], selectedLibraryKeys?: string[] }
 //                 { type: 'replace', findings: Finding[] }
@@ -101,6 +102,7 @@ async function getAvailableCollections() {
 async function buildValueMap(collectionFilter, selectedLocalIds = [], selectedLibraryKeys = []) {
     valueToVariableMap = new Map();
     const usingExplicitSelection = selectedLocalIds.length > 0 || selectedLibraryKeys.length > 0;
+    figma.ui.postMessage({ type: "progress", phase: "tokens" });
     log("info", usingExplicitSelection
         ? `=== Variable Discovery (explicit selection: ${selectedLocalIds.length} local, ${selectedLibraryKeys.length} library) ===`
         : `=== Variable Discovery (filter: "${collectionFilter}") ===`);
@@ -216,13 +218,15 @@ async function buildValueMap(collectionFilter, selectedLocalIds = [], selectedLi
             log("error", `  getVariablesInLibraryCollectionAsync failed for "${libCol.name}": ${err}`);
             continue;
         }
-        for (const stub of libVarStubs) {
-            try {
-                const imported = await figma.variables.importVariableByKeyAsync(stub.key);
-                ingestVariable(imported);
+        // Fire all imports in parallel — eliminates per-variable round-trip latency.
+        const importResults = await Promise.allSettled(libVarStubs.map(stub => figma.variables.importVariableByKeyAsync(stub.key)));
+        for (let i = 0; i < importResults.length; i++) {
+            const result = importResults[i];
+            if (result.status === "fulfilled") {
+                ingestVariable(result.value);
             }
-            catch (err) {
-                log("warn", `  Import failed for variable "${stub.name}" (key=${stub.key}): ${err}`);
+            else {
+                log("warn", `  Import failed for variable "${libVarStubs[i].name}" (key=${libVarStubs[i].key}): ${result.reason}`);
             }
         }
     }
@@ -257,28 +261,64 @@ function ingestVariable(v) {
 // ---------------------------------------------------------------------------
 // Phase 2 — Node scanning
 // ---------------------------------------------------------------------------
-/** Recursively walk a node tree and return all findings. */
-function scanNode(node) {
-    const findings = [];
-    log("info", `Scanning node: "${node.name}" (type=${node.type})`);
-    // Only process nodes with an active Auto Layout
-    if ("layoutMode" in node &&
-        node.layoutMode !== "NONE" &&
-        node.layoutMode !== undefined) {
-        log("info", `  Auto Layout detected (mode=${node.layoutMode})`);
-        for (const prop of SPACING_PROPERTIES) {
-            const finding = checkProperty(node, prop);
-            if (finding)
-                findings.push(finding);
+/** Count all nodes in a set of roots (iterative, no stack-overflow risk). */
+function countNodes(roots) {
+    let count = 0;
+    const stack = [...roots];
+    while (stack.length > 0) {
+        const node = stack.pop();
+        count++;
+        if ("children" in node) {
+            for (const child of node.children) {
+                stack.push(child);
+            }
         }
     }
-    // Recurse into children
-    if ("children" in node) {
-        for (const child of node.children) {
-            findings.push(...scanNode(child));
+    return count;
+}
+/**
+ * Iterative, async scan of all roots.
+ * Yields control back to the plugin sandbox every ~16 ms so the UI spinner
+ * stays responsive on large files, and sends progress messages so the UI
+ * can show a deterministic "X / Y nodes" counter.
+ */
+async function scanAllNodes(roots) {
+    const total = countNodes(roots);
+    figma.ui.postMessage({ type: "progress", phase: "scan", current: 0, total });
+    const allFindings = [];
+    // Push in reverse so the first root is processed first (stack is LIFO).
+    const stack = [...roots].reverse();
+    let scanned = 0;
+    let lastYield = Date.now();
+    while (stack.length > 0) {
+        const node = stack.pop();
+        log("info", `Scanning node: "${node.name}" (type=${node.type})`);
+        if ("layoutMode" in node &&
+            node.layoutMode !== "NONE" &&
+            node.layoutMode !== undefined) {
+            log("info", `  Auto Layout detected (mode=${node.layoutMode})`);
+            for (const prop of SPACING_PROPERTIES) {
+                const finding = checkProperty(node, prop);
+                if (finding)
+                    allFindings.push(finding);
+            }
+        }
+        if ("children" in node) {
+            const children = node.children;
+            for (let i = children.length - 1; i >= 0; i--) {
+                stack.push(children[i]);
+            }
+        }
+        scanned++;
+        // Yield every ~16 ms (one frame) to keep the UI responsive.
+        if (Date.now() - lastYield >= 16) {
+            figma.ui.postMessage({ type: "progress", phase: "scan", current: scanned, total });
+            await new Promise(resolve => setTimeout(resolve, 0));
+            lastYield = Date.now();
         }
     }
-    return findings;
+    figma.ui.postMessage({ type: "progress", phase: "scan", current: scanned, total });
+    return allFindings;
 }
 /**
  * Check one spacing property on one node.
@@ -392,10 +432,7 @@ async function runScan(collectionFilter, scope, selectedLocalIds = [], selectedL
         roots = [...figma.currentPage.children];
         log("info", `Scanning full page (${roots.length} top-level node(s))`);
     }
-    const allFindings = [];
-    for (const root of roots) {
-        allFindings.push(...scanNode(root));
-    }
+    const allFindings = await scanAllNodes(roots);
     log("info", `Scan complete: ${allFindings.length} hardcoded spacing propert${allFindings.length === 1 ? "y" : "ies"} found`);
     flushLog();
     return allFindings;
@@ -409,7 +446,6 @@ getAvailableCollections().then(({ local, library }) => {
     figma.ui.postMessage({ type: "collections-list", local, library });
 });
 figma.ui.onmessage = async (msg) => {
-    var _a, _b, _c, _d, _e;
     // ---- Collection list request (manual refresh) ----
     if (msg.type === "get-collections") {
         const { local, library } = await getAvailableCollections();
@@ -418,10 +454,10 @@ figma.ui.onmessage = async (msg) => {
     }
     // ---- Scan request ----
     if (msg.type === "scan") {
-        const filter = (_a = msg.collectionFilter) !== null && _a !== void 0 ? _a : "spacing";
-        const scope = (_b = msg.scope) !== null && _b !== void 0 ? _b : "page";
-        const selectedLocalIds = (_c = msg.selectedLocalIds) !== null && _c !== void 0 ? _c : [];
-        const selectedLibraryKeys = (_d = msg.selectedLibraryKeys) !== null && _d !== void 0 ? _d : [];
+        const filter = msg.collectionFilter ?? "spacing";
+        const scope = msg.scope ?? "page";
+        const selectedLocalIds = msg.selectedLocalIds ?? [];
+        const selectedLibraryKeys = msg.selectedLibraryKeys ?? [];
         try {
             const findings = await runScan(filter, scope, selectedLocalIds, selectedLibraryKeys);
             figma.ui.postMessage({ type: "scan-results", findings });
@@ -436,7 +472,7 @@ figma.ui.onmessage = async (msg) => {
     }
     // ---- Replace request ----
     if (msg.type === "replace") {
-        const findings = (_e = msg.findings) !== null && _e !== void 0 ? _e : [];
+        const findings = msg.findings ?? [];
         try {
             const updated = await applyReplacements(findings);
             const replacedCount = updated.filter((f) => f.replaced).length;
