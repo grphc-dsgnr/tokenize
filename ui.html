@@ -199,7 +199,10 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 160px;
+    cursor: pointer;
+    transition: color .15s;
   }
+  .finding-node:hover { color: var(--accent); }
   .finding-prop {
     color: var(--text-muted);
     font-size: 10px;
@@ -813,7 +816,10 @@ function renderFindings(findings) {
     const nodeName = document.createElement("div");
     nodeName.className = "finding-node";
     nodeName.textContent = f.nodeName;
-    nodeName.title = f.nodeName;
+    nodeName.title = `${f.nodeName} — click to select in Figma`;
+    nodeName.addEventListener("click", () => {
+      parent.postMessage({ pluginMessage: { type: "select-node", nodeId: f.nodeId } }, "*");
+    });
 
     const propSpan = document.createElement("div");
     propSpan.className = "finding-prop";
