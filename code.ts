@@ -533,7 +533,7 @@ async function applyReplacements(findings: Finding[]): Promise<Finding[]> {
     }
 
     // Retrieve the variable (may be local or already imported)
-    const variable = figma.variables.getVariableById(finding.matchedVariableId);
+    const variable = await figma.variables.getVariableByIdAsync(finding.matchedVariableId);
     if (!variable) {
       log("error", `Variable id=${finding.matchedVariableId} not found for "${finding.nodeName}.${finding.property}"`);
       skipped++;
