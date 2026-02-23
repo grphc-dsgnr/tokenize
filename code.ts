@@ -102,6 +102,10 @@ interface ResolvedVar {
 }
 
 let valueToVariableMap: Map<number, ResolvedVar> = new Map();
+// Cache of variable id → Variable object, populated during scan so that
+// applyReplacements can pass live (fully-hydrated) objects to setBoundVariable
+// without triggering the internal sync getVariableById call.
+let variableByIdCache: Map<string, Variable> = new Map();
 
 // ---------------------------------------------------------------------------
 // All spacing properties we check on each Auto Layout node
@@ -177,6 +181,7 @@ async function buildValueMap(
   selectedLibraryKeys: string[] = []
 ): Promise<void> {
   valueToVariableMap = new Map();
+  variableByIdCache = new Map();
 
   const usingExplicitSelection = selectedLocalIds.length > 0 || selectedLibraryKeys.length > 0;
 
@@ -369,6 +374,10 @@ function ingestVariable(v: Variable): void {
     return;
   }
 
+  // Always cache by id so applyReplacements can pass the live object to
+  // setBoundVariable without triggering an internal sync getVariableById.
+  variableByIdCache.set(v.id, v);
+
   // Only override if not already set (first-match wins, keeps it deterministic)
   if (!valueToVariableMap.has(raw)) {
     valueToVariableMap.set(raw, { variable: v, name: v.name });
@@ -525,15 +534,19 @@ async function applyReplacements(findings: Finding[]): Promise<Finding[]> {
       continue;
     }
 
-    const node = figma.getNodeById(finding.nodeId);
+    const node = await figma.getNodeByIdAsync(finding.nodeId);
     if (!node) {
       log("error", `Node "${finding.nodeName}" (id=${finding.nodeId}) not found — may have been deleted`);
       skipped++;
       continue;
     }
 
-    // Retrieve the variable (may be local or already imported)
-    const variable = figma.variables.getVariableById(finding.matchedVariableId);
+    // Prefer the live variable object cached during scan so that
+    // setBoundVariable receives a fully-hydrated object and does not
+    // trigger an internal sync getVariableById call (blocked under
+    // documentAccess: "dynamic-page").
+    const variable = variableByIdCache.get(finding.matchedVariableId)
+      ?? await figma.variables.getVariableByIdAsync(finding.matchedVariableId);
     if (!variable) {
       log("error", `Variable id=${finding.matchedVariableId} not found for "${finding.nodeName}.${finding.property}"`);
       skipped++;
@@ -674,7 +687,7 @@ figma.ui.onmessage = async (msg: {
 
   // ---- Select node request ----
   if (msg.type === "select-node" && msg.nodeId) {
-    const node = figma.getNodeById(msg.nodeId);
+    const node = await figma.getNodeByIdAsync(msg.nodeId);
     if (node && node.type !== "DOCUMENT" && node.type !== "PAGE") {
       figma.currentPage.selection = [node as SceneNode];
       figma.viewport.scrollAndZoomIntoView([node as SceneNode]);
