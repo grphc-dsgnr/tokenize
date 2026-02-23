@@ -382,14 +382,14 @@ async function applyReplacements(findings) {
             skipped++;
             continue;
         }
-        const node = await figma.getNodeByIdAsync(finding.nodeId);
+        const node = figma.getNodeById(finding.nodeId);
         if (!node) {
             log("error", `Node "${finding.nodeName}" (id=${finding.nodeId}) not found — may have been deleted`);
             skipped++;
             continue;
         }
         // Retrieve the variable (may be local or already imported)
-        const variable = await figma.variables.getVariableByIdAsync(finding.matchedVariableId);
+        const variable = figma.variables.getVariableById(finding.matchedVariableId);
         if (!variable) {
             log("error", `Variable id=${finding.matchedVariableId} not found for "${finding.nodeName}.${finding.property}"`);
             skipped++;
@@ -494,7 +494,7 @@ figma.ui.onmessage = async (msg) => {
     }
     // ---- Select node request ----
     if (msg.type === "select-node" && msg.nodeId) {
-        const node = await figma.getNodeByIdAsync(msg.nodeId);
+        const node = figma.getNodeById(msg.nodeId);
         if (node && node.type !== "DOCUMENT" && node.type !== "PAGE") {
             figma.currentPage.selection = [node];
             figma.viewport.scrollAndZoomIntoView([node]);
