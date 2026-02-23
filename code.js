@@ -494,7 +494,7 @@ figma.ui.onmessage = async (msg) => {
     }
     // ---- Select node request ----
     if (msg.type === "select-node" && msg.nodeId) {
-        const node = figma.getNodeById(msg.nodeId);
+        const node = await figma.getNodeByIdAsync(msg.nodeId);
         if (node && node.type !== "DOCUMENT" && node.type !== "PAGE") {
             figma.currentPage.selection = [node];
             figma.viewport.scrollAndZoomIntoView([node]);
