@@ -525,7 +525,7 @@ async function applyReplacements(findings: Finding[]): Promise<Finding[]> {
       continue;
     }
 
-    const node = await figma.getNodeByIdAsync(finding.nodeId);
+    const node = figma.getNodeById(finding.nodeId);
     if (!node) {
       log("error", `Node "${finding.nodeName}" (id=${finding.nodeId}) not found — may have been deleted`);
       skipped++;
@@ -533,7 +533,7 @@ async function applyReplacements(findings: Finding[]): Promise<Finding[]> {
     }
 
     // Retrieve the variable (may be local or already imported)
-    const variable = await figma.variables.getVariableByIdAsync(finding.matchedVariableId);
+    const variable = figma.variables.getVariableById(finding.matchedVariableId);
     if (!variable) {
       log("error", `Variable id=${finding.matchedVariableId} not found for "${finding.nodeName}.${finding.property}"`);
       skipped++;
@@ -674,7 +674,7 @@ figma.ui.onmessage = async (msg: {
 
   // ---- Select node request ----
   if (msg.type === "select-node" && msg.nodeId) {
-    const node = await figma.getNodeByIdAsync(msg.nodeId);
+    const node = figma.getNodeById(msg.nodeId);
     if (node && node.type !== "DOCUMENT" && node.type !== "PAGE") {
       figma.currentPage.selection = [node as SceneNode];
       figma.viewport.scrollAndZoomIntoView([node as SceneNode]);
