@@ -454,10 +454,10 @@ figma.ui.onmessage = async (msg) => {
     }
     // ---- Scan request ----
     if (msg.type === "scan") {
-        const filter = msg.collectionFilter ?? "spacing";
-        const scope = msg.scope ?? "page";
-        const selectedLocalIds = msg.selectedLocalIds ?? [];
-        const selectedLibraryKeys = msg.selectedLibraryKeys ?? [];
+        const filter = (msg.collectionFilter !== null && msg.collectionFilter !== undefined) ? msg.collectionFilter : "spacing";
+        const scope = (msg.scope !== null && msg.scope !== undefined) ? msg.scope : "page";
+        const selectedLocalIds = (msg.selectedLocalIds !== null && msg.selectedLocalIds !== undefined) ? msg.selectedLocalIds : [];
+        const selectedLibraryKeys = (msg.selectedLibraryKeys !== null && msg.selectedLibraryKeys !== undefined) ? msg.selectedLibraryKeys : [];
         try {
             const findings = await runScan(filter, scope, selectedLocalIds, selectedLibraryKeys);
             figma.ui.postMessage({ type: "scan-results", findings });
@@ -472,7 +472,7 @@ figma.ui.onmessage = async (msg) => {
     }
     // ---- Replace request ----
     if (msg.type === "replace") {
-        const findings = msg.findings ?? [];
+        const findings = (msg.findings !== null && msg.findings !== undefined) ? msg.findings : [];
         try {
             const updated = await applyReplacements(findings);
             const replacedCount = updated.filter((f) => f.replaced).length;
