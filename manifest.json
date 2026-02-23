@@ -1,11 +1,12 @@
 {
   "name": "Tokenize — Auto Layout Spacing Auditor",
-  "id": "tokenize-spacing-auditor",
+  "id": "1607780286000484912",
   "api": "1.0.0",
   "main": "code.js",
   "ui": "ui.html",
   "editorType": ["figma"],
   "permissions": ["currentuser", "teamlibrary"],
+  "documentAccess": "dynamic-page",
   "networkAccess": {
     "allowedDomains": ["none"]
   }
