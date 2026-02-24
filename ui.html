@@ -241,27 +241,116 @@
   #summary .stat.good .num { color: var(--green); }
   #summary .stat.warn .num { color: var(--yellow); }
 
-  /* Unresolved list */
+  /* Unresolved section — grouped by value */
   #unresolved-section { display: none; }
   #unresolved-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  /* One group = one hardcoded value that has no token match */
+  .unresolved-group {
     background: var(--surface);
     border: 1px solid #5a3030;
     border-radius: var(--radius);
-    padding: 6px 8px;
-    font-size: 11px;
-    color: var(--red);
-    max-height: 80px;
-    overflow-y: auto;
+    overflow: hidden;
   }
-  .unresolved-item {
-    padding: 4px 6px;
-    border-bottom: 1px solid #3a2020;
-    cursor: pointer;
+
+  .unresolved-group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: #2a1a1a;
+  }
+  .unresolved-group-value {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--red);
+  }
+  .unresolved-group-count {
+    font-size: 10px;
+    color: var(--text-muted);
+    flex: 1;
+  }
+  .unresolved-group-toggle {
+    background: none;
+    border: 1px solid var(--border);
     border-radius: 3px;
+    color: var(--text-muted);
+    font-size: 9px;
+    cursor: pointer;
+    padding: 1px 5px;
+    font-family: var(--font);
     transition: background .1s;
   }
-  .unresolved-item:last-child { border-bottom: none; }
-  .unresolved-item:hover { background: #3a2020; }
+  .unresolved-group-toggle:hover { background: var(--surface-2); color: var(--text); }
+
+  /* Token assignment row */
+  .unresolved-group-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border-top: 1px solid #3a2020;
+  }
+  .token-select {
+    flex: 1;
+    min-width: 0;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 4px 6px;
+    outline: none;
+    cursor: pointer;
+  }
+  .token-select:focus { border-color: var(--accent); }
+  .group-apply-btn {
+    width: auto !important;
+    padding: 4px 10px !important;
+    font-size: 11px !important;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* Collapsible node list inside a group */
+  .unresolved-node-list {
+    display: none;
+    border-top: 1px solid #3a2020;
+    max-height: 100px;
+    overflow-y: auto;
+    background: #1a1010;
+  }
+  .unresolved-node-list.open { display: block; }
+  .unresolved-node-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    cursor: pointer;
+    font-size: 10px;
+    border-bottom: 1px solid #2a1515;
+    transition: background .1s;
+  }
+  .unresolved-node-item:last-child { border-bottom: none; }
+  .unresolved-node-item:hover { background: #2a1010; }
+  .unresolved-node-item .node-name {
+    color: var(--text);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .unresolved-node-item .node-prop {
+    color: var(--text-muted);
+    font-family: var(--mono);
+    white-space: nowrap;
+  }
 
   /* Error banner */
   #error-banner {
@@ -551,10 +640,10 @@
       <span class="stat warn"><span class="num" id="stat-unresolved">0</span> unresolved</span>
     </div>
 
-    <!-- Unresolved list -->
+    <!-- Unresolved groups — assign a token to each value group -->
     <div id="unresolved-section">
-      <label class="field-label" style="margin-bottom:4px; color: var(--red)">
-        Unresolved — click any item to select it in Figma
+      <label class="field-label" style="margin-bottom:6px; color: var(--red)">
+        Unresolved — assign a token to each group and apply
       </label>
       <div id="unresolved-list"></div>
     </div>
@@ -588,8 +677,9 @@
 
 // ---- State ------------------------------------------------------------------
 let currentScope = "selection";
-let scanFindings = [];   // Finding[] from the last scan
-let fullLogText  = "";   // Plain-text accumulator for "Copy Log"
+let scanFindings    = [];   // Finding[] from the last scan
+let availableTokens = [];   // AvailableToken[] from the last scan (for group dropdowns)
+let fullLogText     = "";   // Plain-text accumulator for "Copy Log"
 
 /** @type {{ type: 'local', id: string, name: string } | { type: 'library', key: string, name: string, libraryName: string }[]} */
 let availableCollections = [];   // all known collections (populated on load)
@@ -773,15 +863,23 @@ window.onmessage = (event) => {
 
   if (msg.type === "scan-results") {
     setLoading(false);
+    availableTokens = msg.availableTokens || [];
     scanFindings = msg.findings || [];
     renderFindings(scanFindings);
   }
 
   if (msg.type === "replace-done") {
     setLoading(false);
-    scanFindings = msg.findings || [];
+    // Merge the returned findings back into scanFindings.
+    // msg.findings may only contain a subset (group apply), so we do a key-based
+    // merge rather than replacing the whole array.
+    const updatedMap = new Map((msg.findings || []).map(f => [f.nodeId + ":" + f.property, f]));
+    scanFindings = scanFindings.map(f => updatedMap.get(f.nodeId + ":" + f.property) || f);
     renderFindings(scanFindings);
-    showSummary(msg.replaced, msg.unresolved);
+    showSummary(
+      scanFindings.filter(f => f.replaced).length,
+      scanFindings.filter(f => !f.replaced && !f.matchedVariableId).length
+    );
   }
 
   if (msg.type === "debug-log") {
@@ -867,24 +965,171 @@ function renderFindings(findings) {
   // Enable Replace All if there are any matched (un-replaced) findings
   elBtnReplace.disabled = matched === 0;
 
-  // Show unresolved section immediately so the user can find & fix them
+  // Show grouped unresolved section so the user can assign tokens and fix groups
   const unresolvedFindings = findings.filter((f) => !f.matchedVariableId && !f.replaced);
   if (unresolvedFindings.length > 0) {
-    elUnresolvedSec.style.display = "block";
-    elUnresolvedList.innerHTML = "";
-    for (const f of unresolvedFindings) {
-      const item = document.createElement("div");
-      item.className = "unresolved-item";
-      item.textContent = `${f.nodeName} — ${f.property}: ${f.rawValue}px`;
-      item.title = "Click to select in Figma";
-      item.addEventListener("click", () => {
-        parent.postMessage({ pluginMessage: { type: "select-node", nodeId: f.nodeId } }, "*");
-      });
-      elUnresolvedList.appendChild(item);
-    }
+    renderUnresolvedGroups(unresolvedFindings);
   } else {
     hideUnresolved();
   }
+}
+
+// ---- Grouped unresolved section --------------------------------------------
+
+/**
+ * Render unmatched findings grouped by their raw pixel value.
+ * Each group gets a token-picker dropdown and an Apply button so the user can
+ * bulk-assign a token to every occurrence of the same wrong value at once.
+ */
+function renderUnresolvedGroups(unresolvedFindings) {
+  elUnresolvedSec.style.display = "block";
+  elUnresolvedList.innerHTML = "";
+
+  // Group findings by rawValue
+  const groups = new Map(); // rawValue (number) → Finding[]
+  for (const f of unresolvedFindings) {
+    if (!groups.has(f.rawValue)) groups.set(f.rawValue, []);
+    groups.get(f.rawValue).push(f);
+  }
+
+  const sortedEntries = [...groups.entries()].sort(([a], [b]) => a - b);
+  // Keep references so the "Fix All" button can iterate across groups
+  const groupSelects = []; // { findings, selectEl }
+
+  for (const [value, groupFindings] of sortedEntries) {
+    const groupEl = document.createElement("div");
+    groupEl.className = "unresolved-group";
+
+    // -- Header row: value + occurrence count + toggle --
+    const header = document.createElement("div");
+    header.className = "unresolved-group-header";
+
+    const valueLabel = document.createElement("span");
+    valueLabel.className = "unresolved-group-value";
+    valueLabel.textContent = `${value}px`;
+
+    const countBadge = document.createElement("span");
+    countBadge.className = "unresolved-group-count";
+    countBadge.textContent = `${groupFindings.length} occurrence${groupFindings.length !== 1 ? "s" : ""}`;
+
+    const toggleBtn = document.createElement("button");
+    toggleBtn.className = "unresolved-group-toggle";
+    toggleBtn.textContent = "▶ nodes";
+
+    header.appendChild(valueLabel);
+    header.appendChild(countBadge);
+    header.appendChild(toggleBtn);
+
+    // -- Collapsible node list --
+    const nodeList = document.createElement("div");
+    nodeList.className = "unresolved-node-list";
+
+    toggleBtn.addEventListener("click", () => {
+      const isOpen = nodeList.classList.toggle("open");
+      toggleBtn.textContent = isOpen ? "▼ nodes" : "▶ nodes";
+    });
+
+    for (const f of groupFindings) {
+      const item = document.createElement("div");
+      item.className = "unresolved-node-item";
+      item.title = "Click to select in Figma";
+
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "node-name";
+      nameSpan.textContent = f.nodeName;
+
+      const propSpan = document.createElement("span");
+      propSpan.className = "node-prop";
+      propSpan.textContent = f.property;
+
+      item.appendChild(nameSpan);
+      item.appendChild(propSpan);
+      item.addEventListener("click", () => {
+        parent.postMessage({ pluginMessage: { type: "select-node", nodeId: f.nodeId } }, "*");
+      });
+      nodeList.appendChild(item);
+    }
+
+    // -- Token assignment row: select + Apply button --
+    const controls = document.createElement("div");
+    controls.className = "unresolved-group-controls";
+
+    const select = document.createElement("select");
+    select.className = "token-select";
+
+    const defaultOpt = document.createElement("option");
+    defaultOpt.value = "";
+    defaultOpt.textContent = availableTokens.length > 0 ? "— choose a token —" : "No tokens available";
+    select.appendChild(defaultOpt);
+
+    for (const token of availableTokens) {
+      const opt = document.createElement("option");
+      opt.value = token.id;
+      opt.textContent = `${token.name}  (${token.value}px)`;
+      select.appendChild(opt);
+    }
+
+    groupSelects.push({ findings: groupFindings, selectEl: select });
+
+    const applyBtn = document.createElement("button");
+    applyBtn.className = "btn btn-secondary group-apply-btn";
+    applyBtn.textContent = "Apply";
+    applyBtn.disabled = availableTokens.length === 0;
+
+    applyBtn.addEventListener("click", () => {
+      const selectedId = select.value;
+      if (!selectedId) return;
+      const token = availableTokens.find(t => t.id === selectedId);
+      if (!token) return;
+      applyGroupToken(groupFindings, token);
+    });
+
+    controls.appendChild(select);
+    controls.appendChild(applyBtn);
+
+    groupEl.appendChild(header);
+    groupEl.appendChild(controls);
+    groupEl.appendChild(nodeList);
+    elUnresolvedList.appendChild(groupEl);
+  }
+
+  // "Fix All Groups" button — only useful when there are multiple groups
+  if (groupSelects.length > 1) {
+    const fixAllBtn = document.createElement("button");
+    fixAllBtn.className = "btn btn-secondary";
+    fixAllBtn.style.marginTop = "8px";
+    fixAllBtn.textContent = "Fix All Groups with Token Selected";
+    fixAllBtn.addEventListener("click", () => {
+      const toReplace = [];
+      for (const { findings, selectEl } of groupSelects) {
+        const selectedId = selectEl.value;
+        if (!selectedId) continue;
+        const token = availableTokens.find(t => t.id === selectedId);
+        if (!token) continue;
+        for (const f of findings) {
+          toReplace.push({ ...f, matchedVariableId: token.id, matchedVariableName: token.name });
+        }
+      }
+      if (toReplace.length === 0) return;
+      setLoading(true, "Applying tokens\u2026");
+      parent.postMessage({ pluginMessage: { type: "replace", findings: toReplace } }, "*");
+    });
+    elUnresolvedList.appendChild(fixAllBtn);
+  }
+}
+
+/**
+ * Apply a specific token to all findings in a group.
+ * Sends only those findings to the plugin so replacement is focused and fast.
+ */
+function applyGroupToken(groupFindings, token) {
+  const findingsToApply = groupFindings.map(f => ({
+    ...f,
+    matchedVariableId: token.id,
+    matchedVariableName: token.name,
+  }));
+  setLoading(true, "Applying token\u2026");
+  parent.postMessage({ pluginMessage: { type: "replace", findings: findingsToApply } }, "*");
 }
 
 // ---- Summary ----------------------------------------------------------------
