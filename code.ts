@@ -9,6 +9,7 @@
 // Message protocol (plugin ↔ UI):
 //   plugin → ui:  { type: 'scan-results', findings: Finding[], availableTokens: AvailableToken[] }
 //                 { type: 'replace-done', replaced: number, unresolved: number, findings: Finding[] }
+//                 { type: 'tokens-list', tokens: AvailableToken[] }
 //                 { type: 'debug-log', entries: LogEntry[] }
 //                 { type: 'error', message: string }
 //                 { type: 'collections-list', local: CollectionInfo[], library: LibraryCollectionInfo[] }
@@ -17,6 +18,8 @@
 //                          selectedLocalIds?: string[], selectedLibraryKeys?: string[] }
 //                 { type: 'replace', findings: Finding[] }
 //                 { type: 'get-collections' }
+//                 { type: 'get-tokens', collectionFilter: string,
+//                          selectedLocalIds?: string[], selectedLibraryKeys?: string[] }
 //                 { type: 'copy-log' }  (handled in ui)
 // =============================================================================
 
@@ -260,14 +263,21 @@ async function buildValueMap(
     `After local pass: ${valueToVariableMap.size} unique spacing value(s) mapped`
   );
 
-  // If we already have a good map, skip the library import pass (faster).
-  if (valueToVariableMap.size > 0) {
+  // Skip the library pass only when we are in filter-only mode and local tokens
+  // already satisfy the request.  When the user has explicitly checked collections
+  // in the picker we must always honour those selections — even if local tokens
+  // were found — because the user may have selected a library collection that
+  // contains the tokens they actually want.
+  if (!usingExplicitSelection && valueToVariableMap.size > 0) {
     flushLog();
     return;
   }
 
   // --- Step 2: Team library collections ---
-  log("info", "No local spacing variables found — attempting library import...");
+  log("info", usingExplicitSelection
+    ? "Explicit library selection — importing selected collections…"
+    : "No local spacing variables found — attempting library import…"
+  );
 
   // Guard: teamLibrary may not exist in older API versions.
   if (typeof figma.teamLibrary === "undefined") {
@@ -707,6 +717,41 @@ figma.ui.onmessage = async (msg: {
       log("error", errMsg);
       flushLog();
       figma.ui.postMessage({ type: "error", message: errMsg });
+    }
+    return;
+  }
+
+  // ---- Get tokens request (populate group-assign dropdowns without re-scanning) ----
+  // The UI sends this when the post-scan availableTokens list was empty.  The user
+  // selects the correct collection in the picker and clicks "Load tokens"; we load
+  // all FLOAT variables from that selection and return them so the dropdowns fill.
+  if (msg.type === "get-tokens") {
+    const filter = msg.collectionFilter ?? "spacing";
+    const selectedLocalIds = msg.selectedLocalIds ?? [];
+    const selectedLibraryKeys = msg.selectedLibraryKeys ?? [];
+
+    try {
+      await buildValueMap(filter, selectedLocalIds, selectedLibraryKeys);
+      const tokens: AvailableToken[] = [...variableByIdCache.entries()]
+        .map(([id, v]) => {
+          const modeKeys = Object.keys(v.valuesByMode);
+          const raw = modeKeys.length > 0 ? v.valuesByMode[modeKeys[0]] : undefined;
+          return { id, name: v.name, value: typeof raw === "number" ? raw : null };
+        })
+        .sort((a, b) => {
+          if (a.value !== null && b.value !== null) return a.value - b.value;
+          if (a.value !== null) return -1;
+          if (b.value !== null) return 1;
+          return a.name.localeCompare(b.name);
+        });
+      log("info", `get-tokens: returning ${tokens.length} token(s)`);
+      flushLog();
+      figma.ui.postMessage({ type: "tokens-list", tokens });
+    } catch (err) {
+      const errMsg = `get-tokens failed: ${err}`;
+      log("error", errMsg);
+      flushLog();
+      figma.ui.postMessage({ type: "tokens-list", tokens: [] });
     }
     return;
   }
