@@ -7,7 +7,7 @@
 // them with matching variables from the linked foundation design system library.
 //
 // Message protocol (plugin ↔ UI):
-//   plugin → ui:  { type: 'scan-results', findings: Finding[] }
+//   plugin → ui:  { type: 'scan-results', findings: Finding[], availableTokens: AvailableToken[] }
 //                 { type: 'replace-done', replaced: number, unresolved: number, findings: Finding[] }
 //                 { type: 'debug-log', entries: LogEntry[] }
 //                 { type: 'error', message: string }
@@ -99,6 +99,13 @@ function flushLog(): void {
 interface ResolvedVar {
   variable: Variable;
   name: string;
+}
+
+/** A token surfaced to the UI so unmatched groups can be assigned a token. */
+interface AvailableToken {
+  id: string;
+  name: string;
+  value: number;
 }
 
 let valueToVariableMap: Map<number, ResolvedVar> = new Map();
@@ -652,7 +659,11 @@ figma.ui.onmessage = async (msg: {
 
     try {
       const findings = await runScan(filter, scope, selectedLocalIds, selectedLibraryKeys);
-      figma.ui.postMessage({ type: "scan-results", findings });
+      // Collect available tokens so the UI can populate group-assign dropdowns.
+      const availableTokens: AvailableToken[] = [...valueToVariableMap.entries()]
+        .map(([value, resolved]) => ({ id: resolved.variable.id, name: resolved.name, value }))
+        .sort((a, b) => a.value - b.value);
+      figma.ui.postMessage({ type: "scan-results", findings, availableTokens });
     } catch (err) {
       const errMsg = `Scan failed: ${err}`;
       log("error", errMsg);
