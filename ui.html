@@ -882,6 +882,14 @@ window.onmessage = (event) => {
     );
   }
 
+  if (msg.type === "tokens-list") {
+    setLoading(false);
+    availableTokens = msg.tokens || [];
+    // Re-render the unresolved groups now that tokens are available
+    const unresolvedFindings = scanFindings.filter(f => !f.matchedVariableId && !f.replaced);
+    if (unresolvedFindings.length > 0) renderUnresolvedGroups(unresolvedFindings);
+  }
+
   if (msg.type === "debug-log") {
     appendLogEntries(msg.entries || []);
   }
@@ -995,6 +1003,41 @@ function renderUnresolvedGroups(unresolvedFindings) {
   const sortedEntries = [...groups.entries()].sort(([a], [b]) => a - b);
   // Keep references so the "Fix All" button can iterate across groups
   const groupSelects = []; // { findings, selectEl }
+
+  // If no tokens are available yet, show a single prompt to load them and bail
+  // out of building individual group controls (they'd all be unusable anyway).
+  if (availableTokens.length === 0) {
+    const prompt = document.createElement("div");
+    prompt.style.cssText =
+      "background:var(--surface);border:1px solid #5a3030;border-radius:var(--radius);" +
+      "padding:10px 12px;font-size:11px;color:var(--text-muted);display:flex;" +
+      "flex-direction:column;gap:8px;";
+
+    const msg = document.createElement("span");
+    msg.innerHTML =
+      "<strong style='color:var(--text)'>No tokens loaded.</strong> " +
+      "Select your design system collection in the picker above, then click " +
+      "<em>Load tokens</em> to populate the dropdowns.";
+    prompt.appendChild(msg);
+
+    const loadBtn = document.createElement("button");
+    loadBtn.className = "btn btn-secondary";
+    loadBtn.style.cssText = "width:auto;align-self:flex-start;font-size:11px;padding:5px 12px;";
+    loadBtn.textContent = "Load tokens";
+    loadBtn.addEventListener("click", () => {
+      const filter = document.getElementById("collection-filter").value.trim() || "spacing";
+      const { localIds, libraryKeys } = getSelectedCollectionIds();
+      setLoading(true, "Loading tokens\u2026");
+      parent.postMessage({
+        pluginMessage: { type: "get-tokens", collectionFilter: filter,
+          selectedLocalIds: localIds, selectedLibraryKeys: libraryKeys }
+      }, "*");
+    });
+    prompt.appendChild(loadBtn);
+
+    elUnresolvedList.appendChild(prompt);
+    return;
+  }
 
   for (const [value, groupFindings] of sortedEntries) {
     const groupEl = document.createElement("div");
