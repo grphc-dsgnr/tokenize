@@ -105,7 +105,8 @@ interface ResolvedVar {
 interface AvailableToken {
   id: string;
   name: string;
-  value: number;
+  /** Resolved numeric value, or null when the variable holds an alias reference. */
+  value: number | null;
 }
 
 let valueToVariableMap: Map<number, ResolvedVar> = new Map();
@@ -376,14 +377,15 @@ function ingestVariable(v: Variable): void {
     `  Ingesting var "${v.name}" | id=${v.id} | mode=${modeKey} | valuesByMode[mode]=${raw}`
   );
 
+  // Always cache by id — includes alias variables so every FLOAT token from the
+  // selected collection is available for group assignment, even when its value
+  // cannot be resolved to a plain number (e.g. it references another variable).
+  variableByIdCache.set(v.id, v);
+
   if (typeof raw !== "number") {
-    log("warn", `  Skipping "${v.name}" — resolved value is not a number (got ${typeof raw})`);
+    log("warn", `  Skipping "${v.name}" for value-matching — value is not a direct number (alias?)`);
     return;
   }
-
-  // Always cache by id so applyReplacements can pass the live object to
-  // setBoundVariable without triggering an internal sync getVariableById.
-  variableByIdCache.set(v.id, v);
 
   // Only override if not already set (first-match wins, keeps it deterministic)
   if (!valueToVariableMap.has(raw)) {
@@ -659,10 +661,23 @@ figma.ui.onmessage = async (msg: {
 
     try {
       const findings = await runScan(filter, scope, selectedLocalIds, selectedLibraryKeys);
-      // Collect available tokens so the UI can populate group-assign dropdowns.
-      const availableTokens: AvailableToken[] = [...valueToVariableMap.entries()]
-        .map(([value, resolved]) => ({ id: resolved.variable.id, name: resolved.name, value }))
-        .sort((a, b) => a.value - b.value);
+      // Collect available tokens from the full cache so the UI can populate
+      // group-assign dropdowns. Using variableByIdCache (not valueToVariableMap)
+      // ensures alias variables are included — they're valid for assignment even
+      // though they can't be matched by numeric value during scanning.
+      const availableTokens: AvailableToken[] = [...variableByIdCache.entries()]
+        .map(([id, v]) => {
+          const modeKeys = Object.keys(v.valuesByMode);
+          const raw = modeKeys.length > 0 ? v.valuesByMode[modeKeys[0]] : undefined;
+          return { id, name: v.name, value: typeof raw === "number" ? raw : null };
+        })
+        .sort((a, b) => {
+          // Numeric tokens first (sorted by value), then aliases sorted by name
+          if (a.value !== null && b.value !== null) return a.value - b.value;
+          if (a.value !== null) return -1;
+          if (b.value !== null) return 1;
+          return a.name.localeCompare(b.name);
+        });
       figma.ui.postMessage({ type: "scan-results", findings, availableTokens });
     } catch (err) {
       const errMsg = `Scan failed: ${err}`;
