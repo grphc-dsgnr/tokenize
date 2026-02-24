@@ -1014,7 +1014,7 @@ function renderUnresolvedGroups(unresolvedFindings) {
 
     const toggleBtn = document.createElement("button");
     toggleBtn.className = "unresolved-group-toggle";
-    toggleBtn.textContent = "▶ nodes";
+    toggleBtn.textContent = "▶ layers";
 
     header.appendChild(valueLabel);
     header.appendChild(countBadge);
@@ -1026,7 +1026,7 @@ function renderUnresolvedGroups(unresolvedFindings) {
 
     toggleBtn.addEventListener("click", () => {
       const isOpen = nodeList.classList.toggle("open");
-      toggleBtn.textContent = isOpen ? "▼ nodes" : "▶ nodes";
+      toggleBtn.textContent = isOpen ? "▼ layers" : "▶ layers";
     });
 
     for (const f of groupFindings) {
@@ -1065,7 +1065,7 @@ function renderUnresolvedGroups(unresolvedFindings) {
     for (const token of availableTokens) {
       const opt = document.createElement("option");
       opt.value = token.id;
-      opt.textContent = `${token.name}  (${token.value}px)`;
+      opt.textContent = token.value !== null ? `${token.name}  (${token.value}px)` : token.name;
       select.appendChild(opt);
     }
 
