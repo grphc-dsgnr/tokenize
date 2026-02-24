@@ -147,7 +147,7 @@ async function getAvailableCollections(): Promise<{
   const library: LibraryCollectionInfo[] = [];
 
   try {
-    const cols = figma.variables.getLocalVariableCollections();
+    const cols = await figma.variables.getLocalVariableCollectionsAsync();
     for (const c of cols) {
       local.push({ id: c.id, name: c.name });
     }
@@ -208,16 +208,16 @@ async function buildValueMap(
   // --- Step 1: Local variables (includes already-imported library vars) ---
   let localVars: Variable[] = [];
   try {
-    localVars = figma.variables.getLocalVariables("FLOAT");
-    log("info", `getLocalVariables() returned ${localVars.length} FLOAT variables`);
+    localVars = await figma.variables.getLocalVariablesAsync("FLOAT");
+    log("info", `getLocalVariablesAsync() returned ${localVars.length} FLOAT variables`);
   } catch (err) {
-    log("warn", `getLocalVariables() failed: ${err}`);
+    log("warn", `getLocalVariablesAsync() failed: ${err}`);
   }
 
   // Identify all collections to show the user what's available
   let allCollections: VariableCollection[] = [];
   try {
-    allCollections = figma.variables.getLocalVariableCollections();
+    allCollections = await figma.variables.getLocalVariableCollectionsAsync();
     log("info", `Found ${allCollections.length} local collection(s):`);
     for (const col of allCollections) {
       log("info", `  • "${col.name}" (id=${col.id}, remote=${col.remote})`);
