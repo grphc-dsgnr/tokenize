@@ -149,7 +149,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    max-height: 200px;
+    max-height: 440px;
     overflow-y: auto;
     margin-bottom: 8px;
   }
@@ -509,9 +509,9 @@
     flex-shrink: 0;
   }
 
-  /* Expand findings list when setup is collapsed */
+  /* Keep findings list height capped when setup is collapsed */
   #findings-list.expanded {
-    max-height: none;
+    max-height: 440px;
   }
 
   /* =========================================================
@@ -624,20 +624,6 @@
         </div>
       </div>
 
-      <!-- Collection filter fallback (used only when no collections are checked) -->
-      <div>
-        <label class="field-label" for="collection-filter">
-          Name filter <span style="color:var(--text-muted);font-weight:400">(fallback if none selected above)</span>
-        </label>
-        <input
-          type="text"
-          id="collection-filter"
-          value="spacing"
-          placeholder="e.g. spacing, foundation…"
-          spellcheck="false"
-        />
-      </div>
-
       <!-- Scan button + loading indicator -->
       <div style="display:flex; gap:8px; align-items:center;">
         <button class="btn btn-primary" id="btn-scan" style="flex:1">Scan</button>
@@ -719,7 +705,6 @@ let fullLogText     = "";   // Plain-text accumulator for "Copy Log"
 let availableCollections = [];   // all known collections (populated on load)
 
 // ---- Element refs -----------------------------------------------------------
-const elFilter      = document.getElementById("collection-filter");
 const elBtnScan     = document.getElementById("btn-scan");
 const elBtnReplace  = document.getElementById("btn-replace");
 const elLoading     = document.getElementById("loading");
@@ -835,7 +820,7 @@ elBtnRefresh.addEventListener("click", () => {
 
 // ---- Scan -------------------------------------------------------------------
 elBtnScan.addEventListener("click", () => {
-  const filter = elFilter.value.trim() || "spacing";
+  const filter = "";
   const { localIds, libraryKeys } = getSelectedCollectionIds();
   clearError();
   setLoading(true, "Starting scan\u2026");
@@ -1050,7 +1035,7 @@ function renderUnresolvedGroups(unresolvedFindings) {
     loadBtn.style.cssText = "width:auto;align-self:flex-start;font-size:11px;padding:5px 12px;";
     loadBtn.textContent = "Load tokens";
     loadBtn.addEventListener("click", () => {
-      const filter = document.getElementById("collection-filter").value.trim() || "spacing";
+      const filter = "";
       const { localIds, libraryKeys } = getSelectedCollectionIds();
       setLoading(true, "Loading tokens\u2026");
       parent.postMessage({
