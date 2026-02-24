@@ -1,6 +1,6 @@
 {
   "name": "tokenize-spacing-auditor",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Figma plugin that audits Auto Layout spacing and replaces hardcoded values with design token variables",
   "scripts": {
     "build": "tsc -p tsconfig.json",

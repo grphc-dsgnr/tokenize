@@ -485,6 +485,60 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* =========================================================
+     Setup panel (collapsible post-scan)
+     ========================================================= */
+  #setup-panel {
+    display: contents; /* children participate in #main's gap normally */
+  }
+  #setup-panel.collapsed {
+    display: none;
+  }
+
+  /* Compact summary bar shown after scan completes */
+  #setup-summary {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+  }
+  #setup-summary.visible {
+    display: flex;
+  }
+  #setup-summary-info {
+    flex: 1;
+    min-width: 0;
+  }
+  .summary-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    display: block;
+    margin-bottom: 1px;
+  }
+  #setup-summary-detail {
+    font-size: 11px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+  }
+  #btn-new-scan {
+    width: auto !important;
+    padding: 6px 12px !important;
+    font-size: 11px !important;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* Expand findings list when setup is collapsed */
+  #findings-list.expanded {
+    max-height: none;
+  }
+
+  /* =========================================================
      Debug panel (collapsible)
      ========================================================= */
   #debug-section {
@@ -567,7 +621,7 @@
   <div id="header">
     <h1>Tokenize — Spacing Auditor</h1>
     <p>Replace hardcoded Auto Layout spacing with design tokens</p>
-    <p style="margin-top:4px; font-size:10px; color:#555">v1.0.1 &middot; Questions? Ping <strong style="color:#777">@Steven</strong> on Slack</p>
+    <p style="margin-top:4px; font-size:10px; color:#555">v1.0.2 &middot; Questions? Ping <strong style="color:#777">@Steven</strong> on Slack</p>
   </div>
 
   <!-- ======================================================
@@ -575,49 +629,63 @@
        ====================================================== -->
   <div id="main">
 
-    <!-- Library collection picker -->
-    <div>
-      <label class="field-label">Library collections</label>
-      <div id="collection-picker">
-        <div id="collection-picker-header">
-          <span id="collection-picker-hint">Select collections to scan</span>
-          <button id="btn-refresh-collections" title="Refresh collection list">↻ Refresh</button>
-        </div>
-        <div id="collection-list">
-          <div id="collection-loading">
-            <div class="spinner"></div> Loading…
+    <!-- ── Setup panel (hidden after scan completes) ── -->
+    <div id="setup-panel">
+
+      <!-- Library collection picker -->
+      <div>
+        <label class="field-label">Library collections</label>
+        <div id="collection-picker">
+          <div id="collection-picker-header">
+            <span id="collection-picker-hint">Select collections to scan</span>
+            <button id="btn-refresh-collections" title="Refresh collection list">↻ Refresh</button>
+          </div>
+          <div id="collection-list">
+            <div id="collection-loading">
+              <div class="spinner"></div> Loading…
+            </div>
           </div>
         </div>
       </div>
-    </div>
 
-    <!-- Collection filter fallback (used only when no collections are checked) -->
-    <div>
-      <label class="field-label" for="collection-filter">
-        Name filter <span style="color:var(--text-muted);font-weight:400">(fallback if none selected above)</span>
-      </label>
-      <input
-        type="text"
-        id="collection-filter"
-        value="spacing"
-        placeholder="e.g. spacing, foundation…"
-        spellcheck="false"
-      />
-    </div>
-
-    <!-- Scope selector -->
-    <div>
-      <label class="field-label">Scan scope</label>
-      <div class="toggle-group">
-        <button class="toggle-btn active" data-scope="selection" id="btn-selection">Selection</button>
-        <button class="toggle-btn"        data-scope="page"      id="btn-page">Full Page</button>
+      <!-- Collection filter fallback (used only when no collections are checked) -->
+      <div>
+        <label class="field-label" for="collection-filter">
+          Name filter <span style="color:var(--text-muted);font-weight:400">(fallback if none selected above)</span>
+        </label>
+        <input
+          type="text"
+          id="collection-filter"
+          value="spacing"
+          placeholder="e.g. spacing, foundation…"
+          spellcheck="false"
+        />
       </div>
-    </div>
 
-    <!-- Scan button + loading indicator -->
-    <div style="display:flex; gap:8px; align-items:center;">
-      <button class="btn btn-primary" id="btn-scan" style="flex:1">Scan</button>
-      <div id="loading"><div class="spinner"></div> <span id="loading-label">Scanning…</span></div>
+      <!-- Scope selector -->
+      <div>
+        <label class="field-label">Scan scope</label>
+        <div class="toggle-group">
+          <button class="toggle-btn active" data-scope="selection" id="btn-selection">Selection</button>
+          <button class="toggle-btn"        data-scope="page"      id="btn-page">Full Page</button>
+        </div>
+      </div>
+
+      <!-- Scan button + loading indicator -->
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button class="btn btn-primary" id="btn-scan" style="flex:1">Scan</button>
+        <div id="loading"><div class="spinner"></div> <span id="loading-label">Scanning…</span></div>
+      </div>
+
+    </div><!-- /#setup-panel -->
+
+    <!-- ── Post-scan summary bar (shown when setup panel is collapsed) ── -->
+    <div id="setup-summary">
+      <div id="setup-summary-info">
+        <span class="summary-label">Scan settings</span>
+        <span id="setup-summary-detail"></span>
+      </div>
+      <button class="btn btn-secondary" id="btn-new-scan">↩ New Scan</button>
     </div>
 
     <!-- Error banner -->
@@ -866,6 +934,7 @@ window.onmessage = (event) => {
     availableTokens = msg.availableTokens || [];
     scanFindings = msg.findings || [];
     renderFindings(scanFindings);
+    collapseSetup();
   }
 
   if (msg.type === "replace-done") {
@@ -1190,6 +1259,47 @@ function hideUnresolved() {
   elUnresolvedSec.style.display = "none";
   elUnresolvedList.innerHTML = "";
 }
+
+// ---- Setup panel collapse / expand -----------------------------------------
+
+const elSetupPanel   = document.getElementById("setup-panel");
+const elSetupSummary = document.getElementById("setup-summary");
+const elSummaryDetail = document.getElementById("setup-summary-detail");
+const elBtnNewScan   = document.getElementById("btn-new-scan");
+
+function collapseSetup() {
+  // Build a one-line summary of what was scanned
+  const scopeText = currentScope === "selection" ? "Selection" : "Full Page";
+  const checked = elCollectionList.querySelectorAll("input[type=checkbox]:checked");
+  const collText = checked.length > 0
+    ? `${checked.length} collection${checked.length > 1 ? "s" : ""}`
+    : `"${elFilter.value.trim() || "spacing"}" filter`;
+  elSummaryDetail.textContent = `${scopeText} · ${collText}`;
+
+  elSetupPanel.classList.add("collapsed");
+  elSetupSummary.classList.add("visible");
+
+  // Let the findings list use all available vertical space
+  elFindingsList.classList.add("expanded");
+}
+
+function startNewScan() {
+  elSetupPanel.classList.remove("collapsed");
+  elSetupSummary.classList.remove("visible");
+
+  // Restore findings list constrained height
+  elFindingsList.classList.remove("expanded");
+
+  // Clear previous results
+  elResults.style.display = "none";
+  hideSummary();
+  hideUnresolved();
+  clearError();
+  elBtnReplace.disabled = true;
+  scanFindings = [];
+}
+
+elBtnNewScan.addEventListener("click", startNewScan);
 
 // ---- Error ------------------------------------------------------------------
 function showError(message) {
