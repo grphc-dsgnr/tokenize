@@ -8,8 +8,9 @@
 // them with matching variables from the linked foundation design system library.
 //
 // Message protocol (plugin ↔ UI):
-//   plugin → ui:  { type: 'scan-results', findings: Finding[] }
+//   plugin → ui:  { type: 'scan-results', findings: Finding[], availableTokens: AvailableToken[] }
 //                 { type: 'replace-done', replaced: number, unresolved: number, findings: Finding[] }
+//                 { type: 'tokens-list', tokens: AvailableToken[] }
 //                 { type: 'debug-log', entries: LogEntry[] }
 //                 { type: 'error', message: string }
 //                 { type: 'collections-list', local: CollectionInfo[], library: LibraryCollectionInfo[] }
@@ -18,6 +19,8 @@
 //                          selectedLocalIds?: string[], selectedLibraryKeys?: string[] }
 //                 { type: 'replace', findings: Finding[] }
 //                 { type: 'get-collections' }
+//                 { type: 'get-tokens', collectionFilter: string,
+//                          selectedLocalIds?: string[], selectedLibraryKeys?: string[] }
 //                 { type: 'copy-log' }  (handled in ui)
 // =============================================================================
 figma.showUI(__html__, { width: 420, height: 640, title: "Tokenize – Spacing Auditor" });
@@ -66,7 +69,7 @@ async function getAvailableCollections() {
     const local = [];
     const library = [];
     try {
-        const cols = figma.variables.getLocalVariableCollections();
+        const cols = await figma.variables.getLocalVariableCollectionsAsync();
         for (const c of cols) {
             local.push({ id: c.id, name: c.name });
         }
@@ -114,16 +117,16 @@ async function buildValueMap(collectionFilter, selectedLocalIds = [], selectedLi
     // --- Step 1: Local variables (includes already-imported library vars) ---
     let localVars = [];
     try {
-        localVars = figma.variables.getLocalVariables("FLOAT");
-        log("info", `getLocalVariables() returned ${localVars.length} FLOAT variables`);
+        localVars = await figma.variables.getLocalVariablesAsync("FLOAT");
+        log("info", `getLocalVariablesAsync() returned ${localVars.length} FLOAT variables`);
     }
     catch (err) {
-        log("warn", `getLocalVariables() failed: ${err}`);
+        log("warn", `getLocalVariablesAsync() failed: ${err}`);
     }
     // Identify all collections to show the user what's available
     let allCollections = [];
     try {
-        allCollections = figma.variables.getLocalVariableCollections();
+        allCollections = await figma.variables.getLocalVariableCollectionsAsync();
         log("info", `Found ${allCollections.length} local collection(s):`);
         for (const col of allCollections) {
             log("info", `  • "${col.name}" (id=${col.id}, remote=${col.remote})`);
@@ -162,13 +165,19 @@ async function buildValueMap(collectionFilter, selectedLocalIds = [], selectedLi
         ingestVariable(v);
     }
     log("info", `After local pass: ${valueToVariableMap.size} unique spacing value(s) mapped`);
-    // If we already have a good map, skip the library import pass (faster).
-    if (valueToVariableMap.size > 0) {
+    // Skip the library pass only when we are in filter-only mode and local tokens
+    // already satisfy the request.  When the user has explicitly checked collections
+    // in the picker we must always honour those selections — even if local tokens
+    // were found — because the user may have selected a library collection that
+    // contains the tokens they actually want.
+    if (!usingExplicitSelection && valueToVariableMap.size > 0) {
         flushLog();
         return;
     }
     // --- Step 2: Team library collections ---
-    log("info", "No local spacing variables found — attempting library import...");
+    log("info", usingExplicitSelection
+        ? "Explicit library selection — importing selected collections…"
+        : "No local spacing variables found — attempting library import…");
     // Guard: teamLibrary may not exist in older API versions.
     if (typeof figma.teamLibrary === "undefined") {
         log("warn", "figma.teamLibrary is undefined (older plugin API). Cannot fetch remote libraries.");
@@ -254,13 +263,14 @@ function ingestVariable(v) {
     const modeKey = modeKeys[0];
     const raw = v.valuesByMode[modeKey];
     log("info", `  Ingesting var "${v.name}" | id=${v.id} | mode=${modeKey} | valuesByMode[mode]=${raw}`);
+    // Always cache by id — includes alias variables so every FLOAT token from the
+    // selected collection is available for group assignment, even when its value
+    // cannot be resolved to a plain number (e.g. it references another variable).
+    variableByIdCache.set(v.id, v);
     if (typeof raw !== "number") {
-        log("warn", `  Skipping "${v.name}" — resolved value is not a number (got ${typeof raw})`);
+        log("warn", `  Skipping "${v.name}" for value-matching — value is not a direct number (alias?)`);
         return;
     }
-    // Always cache by id so applyReplacements can pass the live object to
-    // setBoundVariable without triggering an internal sync getVariableById.
-    variableByIdCache.set(v.id, v);
     // Only override if not already set (first-match wins, keeps it deterministic)
     if (!valueToVariableMap.has(raw)) {
         valueToVariableMap.set(raw, { variable: v, name: v.name });
@@ -382,6 +392,7 @@ function checkProperty(node, prop) {
  * Returns the updated findings array (with replaced flags set).
  */
 async function applyReplacements(findings) {
+    var _a;
     log("info", "=== Applying Replacements ===");
     let replaced = 0;
     let skipped = 0;
@@ -400,8 +411,7 @@ async function applyReplacements(findings) {
         // setBoundVariable receives a fully-hydrated object and does not
         // trigger an internal sync getVariableById call (blocked under
         // documentAccess: "dynamic-page").
-        const variable = variableByIdCache.get(finding.matchedVariableId)
-            || await figma.variables.getVariableByIdAsync(finding.matchedVariableId);
+        const variable = (_a = variableByIdCache.get(finding.matchedVariableId)) !== null && _a !== void 0 ? _a : await figma.variables.getVariableByIdAsync(finding.matchedVariableId);
         if (!variable) {
             log("error", `Variable id=${finding.matchedVariableId} not found for "${finding.nodeName}.${finding.property}"`);
             skipped++;
@@ -458,6 +468,7 @@ getAvailableCollections().then(({ local, library }) => {
     figma.ui.postMessage({ type: "collections-list", local, library });
 });
 figma.ui.onmessage = async (msg) => {
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     // ---- Collection list request (manual refresh) ----
     if (msg.type === "get-collections") {
         const { local, library } = await getAvailableCollections();
@@ -466,13 +477,33 @@ figma.ui.onmessage = async (msg) => {
     }
     // ---- Scan request ----
     if (msg.type === "scan") {
-        const filter = (msg.collectionFilter !== null && msg.collectionFilter !== undefined) ? msg.collectionFilter : "spacing";
-        const scope = (msg.scope !== null && msg.scope !== undefined) ? msg.scope : "page";
-        const selectedLocalIds = (msg.selectedLocalIds !== null && msg.selectedLocalIds !== undefined) ? msg.selectedLocalIds : [];
-        const selectedLibraryKeys = (msg.selectedLibraryKeys !== null && msg.selectedLibraryKeys !== undefined) ? msg.selectedLibraryKeys : [];
+        const filter = (_a = msg.collectionFilter) !== null && _a !== void 0 ? _a : "spacing";
+        const scope = (_b = msg.scope) !== null && _b !== void 0 ? _b : "page";
+        const selectedLocalIds = (_c = msg.selectedLocalIds) !== null && _c !== void 0 ? _c : [];
+        const selectedLibraryKeys = (_d = msg.selectedLibraryKeys) !== null && _d !== void 0 ? _d : [];
         try {
             const findings = await runScan(filter, scope, selectedLocalIds, selectedLibraryKeys);
-            figma.ui.postMessage({ type: "scan-results", findings });
+            // Collect available tokens from the full cache so the UI can populate
+            // group-assign dropdowns. Using variableByIdCache (not valueToVariableMap)
+            // ensures alias variables are included — they're valid for assignment even
+            // though they can't be matched by numeric value during scanning.
+            const availableTokens = [...variableByIdCache.entries()]
+                .map(([id, v]) => {
+                const modeKeys = Object.keys(v.valuesByMode);
+                const raw = modeKeys.length > 0 ? v.valuesByMode[modeKeys[0]] : undefined;
+                return { id, name: v.name, value: typeof raw === "number" ? raw : null };
+            })
+                .sort((a, b) => {
+                // Numeric tokens first (sorted by value), then aliases sorted by name
+                if (a.value !== null && b.value !== null)
+                    return a.value - b.value;
+                if (a.value !== null)
+                    return -1;
+                if (b.value !== null)
+                    return 1;
+                return a.name.localeCompare(b.name);
+            });
+            figma.ui.postMessage({ type: "scan-results", findings, availableTokens });
         }
         catch (err) {
             const errMsg = `Scan failed: ${err}`;
@@ -484,7 +515,7 @@ figma.ui.onmessage = async (msg) => {
     }
     // ---- Replace request ----
     if (msg.type === "replace") {
-        const findings = (msg.findings !== null && msg.findings !== undefined) ? msg.findings : [];
+        const findings = (_e = msg.findings) !== null && _e !== void 0 ? _e : [];
         try {
             const updated = await applyReplacements(findings);
             const replacedCount = updated.filter((f) => f.replaced).length;
@@ -501,6 +532,43 @@ figma.ui.onmessage = async (msg) => {
             log("error", errMsg);
             flushLog();
             figma.ui.postMessage({ type: "error", message: errMsg });
+        }
+        return;
+    }
+    // ---- Get tokens request (populate group-assign dropdowns without re-scanning) ----
+    // The UI sends this when the post-scan availableTokens list was empty.  The user
+    // selects the correct collection in the picker and clicks "Load tokens"; we load
+    // all FLOAT variables from that selection and return them so the dropdowns fill.
+    if (msg.type === "get-tokens") {
+        const filter = (_f = msg.collectionFilter) !== null && _f !== void 0 ? _f : "spacing";
+        const selectedLocalIds = (_g = msg.selectedLocalIds) !== null && _g !== void 0 ? _g : [];
+        const selectedLibraryKeys = (_h = msg.selectedLibraryKeys) !== null && _h !== void 0 ? _h : [];
+        try {
+            await buildValueMap(filter, selectedLocalIds, selectedLibraryKeys);
+            const tokens = [...variableByIdCache.entries()]
+                .map(([id, v]) => {
+                const modeKeys = Object.keys(v.valuesByMode);
+                const raw = modeKeys.length > 0 ? v.valuesByMode[modeKeys[0]] : undefined;
+                return { id, name: v.name, value: typeof raw === "number" ? raw : null };
+            })
+                .sort((a, b) => {
+                if (a.value !== null && b.value !== null)
+                    return a.value - b.value;
+                if (a.value !== null)
+                    return -1;
+                if (b.value !== null)
+                    return 1;
+                return a.name.localeCompare(b.name);
+            });
+            log("info", `get-tokens: returning ${tokens.length} token(s)`);
+            flushLog();
+            figma.ui.postMessage({ type: "tokens-list", tokens });
+        }
+        catch (err) {
+            const errMsg = `get-tokens failed: ${err}`;
+            log("error", errMsg);
+            flushLog();
+            figma.ui.postMessage({ type: "tokens-list", tokens: [] });
         }
         return;
     }
