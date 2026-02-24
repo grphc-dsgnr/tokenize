@@ -15,7 +15,7 @@
 //                 { type: 'error', message: string }
 //                 { type: 'collections-list', local: CollectionInfo[], library: LibraryCollectionInfo[] }
 //                 { type: 'progress', phase: 'tokens' | 'scan', current?: number, total?: number }
-//   ui → plugin:  { type: 'scan', collectionFilter: string, scope: 'selection' | 'page',
+//   ui → plugin:  { type: 'scan', collectionFilter: string,
 //                          selectedLocalIds?: string[], selectedLibraryKeys?: string[] }
 //                 { type: 'replace', findings: Finding[] }
 //                 { type: 'get-collections' }
@@ -436,24 +436,24 @@ async function applyReplacements(findings) {
 // ---------------------------------------------------------------------------
 // Root scan orchestrator
 // ---------------------------------------------------------------------------
-async function runScan(collectionFilter, scope, selectedLocalIds = [], selectedLibraryKeys = []) {
-    log("info", `=== Scan Started (scope=${scope}) ===`);
+async function runScan(collectionFilter, selectedLocalIds = [], selectedLibraryKeys = []) {
+    log("info", `=== Scan Started (scope=selection) ===`);
+    // Validate that something is selected
+    const selection = figma.currentPage.selection;
+    if (selection.length === 0) {
+        throw new Error("No selection. Please select a frame or artboard to scan.");
+    }
+    // Validate that at least one selected node is a frame or artboard
+    const frameTypes = new Set(["FRAME", "COMPONENT", "INSTANCE"]);
+    const hasFrame = selection.some(node => frameTypes.has(node.type));
+    if (!hasFrame) {
+        throw new Error("Selection contains no frames or artboards. Please select at least one frame or artboard and try again.");
+    }
     // Build the value→variable map first
     await buildValueMap(collectionFilter, selectedLocalIds, selectedLibraryKeys);
-    // Determine which nodes to scan
-    let roots;
-    if (scope === "selection") {
-        roots = figma.currentPage.selection.length > 0
-            ? [...figma.currentPage.selection]
-            : [...figma.currentPage.children]; // Fall back to page if nothing selected
-        log("info", figma.currentPage.selection.length > 0
-            ? `Scanning ${roots.length} selected node(s)`
-            : "Nothing selected — scanning full page");
-    }
-    else {
-        roots = [...figma.currentPage.children];
-        log("info", `Scanning full page (${roots.length} top-level node(s))`);
-    }
+    // Scan only the selected nodes
+    const roots = [...selection];
+    log("info", `Scanning ${roots.length} selected node(s)`);
     const allFindings = await scanAllNodes(roots);
     log("info", `Scan complete: ${allFindings.length} hardcoded spacing propert${allFindings.length === 1 ? "y" : "ies"} found`);
     flushLog();
@@ -468,7 +468,7 @@ getAvailableCollections().then(({ local, library }) => {
     figma.ui.postMessage({ type: "collections-list", local, library });
 });
 figma.ui.onmessage = async (msg) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h;
+    var _a, _b, _c, _d, _e, _f, _g;
     // ---- Collection list request (manual refresh) ----
     if (msg.type === "get-collections") {
         const { local, library } = await getAvailableCollections();
@@ -478,11 +478,10 @@ figma.ui.onmessage = async (msg) => {
     // ---- Scan request ----
     if (msg.type === "scan") {
         const filter = (_a = msg.collectionFilter) !== null && _a !== void 0 ? _a : "spacing";
-        const scope = (_b = msg.scope) !== null && _b !== void 0 ? _b : "page";
-        const selectedLocalIds = (_c = msg.selectedLocalIds) !== null && _c !== void 0 ? _c : [];
-        const selectedLibraryKeys = (_d = msg.selectedLibraryKeys) !== null && _d !== void 0 ? _d : [];
+        const selectedLocalIds = (_b = msg.selectedLocalIds) !== null && _b !== void 0 ? _b : [];
+        const selectedLibraryKeys = (_c = msg.selectedLibraryKeys) !== null && _c !== void 0 ? _c : [];
         try {
-            const findings = await runScan(filter, scope, selectedLocalIds, selectedLibraryKeys);
+            const findings = await runScan(filter, selectedLocalIds, selectedLibraryKeys);
             // Collect available tokens from the full cache so the UI can populate
             // group-assign dropdowns. Using variableByIdCache (not valueToVariableMap)
             // ensures alias variables are included — they're valid for assignment even
@@ -515,7 +514,7 @@ figma.ui.onmessage = async (msg) => {
     }
     // ---- Replace request ----
     if (msg.type === "replace") {
-        const findings = (_e = msg.findings) !== null && _e !== void 0 ? _e : [];
+        const findings = (_d = msg.findings) !== null && _d !== void 0 ? _d : [];
         try {
             const updated = await applyReplacements(findings);
             const replacedCount = updated.filter((f) => f.replaced).length;
@@ -540,9 +539,9 @@ figma.ui.onmessage = async (msg) => {
     // selects the correct collection in the picker and clicks "Load tokens"; we load
     // all FLOAT variables from that selection and return them so the dropdowns fill.
     if (msg.type === "get-tokens") {
-        const filter = (_f = msg.collectionFilter) !== null && _f !== void 0 ? _f : "spacing";
-        const selectedLocalIds = (_g = msg.selectedLocalIds) !== null && _g !== void 0 ? _g : [];
-        const selectedLibraryKeys = (_h = msg.selectedLibraryKeys) !== null && _h !== void 0 ? _h : [];
+        const filter = (_e = msg.collectionFilter) !== null && _e !== void 0 ? _e : "spacing";
+        const selectedLocalIds = (_f = msg.selectedLocalIds) !== null && _f !== void 0 ? _f : [];
+        const selectedLibraryKeys = (_g = msg.selectedLibraryKeys) !== null && _g !== void 0 ? _g : [];
         try {
             await buildValueMap(filter, selectedLocalIds, selectedLibraryKeys);
             const tokens = [...variableByIdCache.entries()]

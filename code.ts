@@ -14,7 +14,7 @@
 //                 { type: 'error', message: string }
 //                 { type: 'collections-list', local: CollectionInfo[], library: LibraryCollectionInfo[] }
 //                 { type: 'progress', phase: 'tokens' | 'scan', current?: number, total?: number }
-//   ui → plugin:  { type: 'scan', collectionFilter: string, scope: 'selection' | 'page',
+//   ui → plugin:  { type: 'scan', collectionFilter: string,
 //                          selectedLocalIds?: string[], selectedLibraryKeys?: string[] }
 //                 { type: 'replace', findings: Finding[] }
 //                 { type: 'get-collections' }
@@ -599,31 +599,32 @@ async function applyReplacements(findings: Finding[]): Promise<Finding[]> {
 
 async function runScan(
   collectionFilter: string,
-  scope: "selection" | "page",
   selectedLocalIds: string[] = [],
   selectedLibraryKeys: string[] = []
 ): Promise<Finding[]> {
-  log("info", `=== Scan Started (scope=${scope}) ===`);
+  log("info", `=== Scan Started (scope=selection) ===`);
+
+  // Validate that something is selected
+  const selection = figma.currentPage.selection;
+  if (selection.length === 0) {
+    throw new Error("No selection. Please select a frame or artboard to scan.");
+  }
+
+  // Validate that at least one selected node is a frame or artboard
+  const frameTypes = new Set<string>(["FRAME", "COMPONENT", "INSTANCE"]);
+  const hasFrame = selection.some(node => frameTypes.has(node.type));
+  if (!hasFrame) {
+    throw new Error(
+      "Selection contains no frames or artboards. Please select at least one frame or artboard and try again."
+    );
+  }
 
   // Build the value→variable map first
   await buildValueMap(collectionFilter, selectedLocalIds, selectedLibraryKeys);
 
-  // Determine which nodes to scan
-  let roots: SceneNode[];
-  if (scope === "selection") {
-    roots = figma.currentPage.selection.length > 0
-      ? [...figma.currentPage.selection]
-      : [...figma.currentPage.children]; // Fall back to page if nothing selected
-    log(
-      "info",
-      figma.currentPage.selection.length > 0
-        ? `Scanning ${roots.length} selected node(s)`
-        : "Nothing selected — scanning full page"
-    );
-  } else {
-    roots = [...figma.currentPage.children];
-    log("info", `Scanning full page (${roots.length} top-level node(s))`);
-  }
+  // Scan only the selected nodes
+  const roots: SceneNode[] = [...selection];
+  log("info", `Scanning ${roots.length} selected node(s)`);
 
   const allFindings = await scanAllNodes(roots);
 
@@ -649,7 +650,6 @@ getAvailableCollections().then(({ local, library }) => {
 figma.ui.onmessage = async (msg: {
   type: string;
   collectionFilter?: string;
-  scope?: "selection" | "page";
   selectedLocalIds?: string[];
   selectedLibraryKeys?: string[];
   findings?: Finding[];
@@ -665,12 +665,11 @@ figma.ui.onmessage = async (msg: {
   // ---- Scan request ----
   if (msg.type === "scan") {
     const filter = msg.collectionFilter ?? "spacing";
-    const scope = msg.scope ?? "page";
     const selectedLocalIds = msg.selectedLocalIds ?? [];
     const selectedLibraryKeys = msg.selectedLibraryKeys ?? [];
 
     try {
-      const findings = await runScan(filter, scope, selectedLocalIds, selectedLibraryKeys);
+      const findings = await runScan(filter, selectedLocalIds, selectedLibraryKeys);
       // Collect available tokens from the full cache so the UI can populate
       // group-assign dropdowns. Using variableByIdCache (not valueToVariableMap)
       // ensures alias variables are included — they're valid for assignment even

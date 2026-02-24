@@ -104,30 +104,6 @@
   }
   input[type="text"]:focus { border-color: var(--accent); }
 
-  /* Scope toggle */
-  .toggle-group {
-    display: flex;
-    gap: 4px;
-  }
-  .toggle-btn {
-    flex: 1;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: var(--text-muted);
-    font-family: var(--font);
-    font-size: 12px;
-    padding: 6px 0;
-    cursor: pointer;
-    text-align: center;
-    transition: background .15s, border-color .15s, color .15s;
-  }
-  .toggle-btn.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-
   /* Primary / secondary buttons */
   .btn {
     width: 100%;
@@ -662,15 +638,6 @@
         />
       </div>
 
-      <!-- Scope selector -->
-      <div>
-        <label class="field-label">Scan scope</label>
-        <div class="toggle-group">
-          <button class="toggle-btn active" data-scope="selection" id="btn-selection">Selection</button>
-          <button class="toggle-btn"        data-scope="page"      id="btn-page">Full Page</button>
-        </div>
-      </div>
-
       <!-- Scan button + loading indicator -->
       <div style="display:flex; gap:8px; align-items:center;">
         <button class="btn btn-primary" id="btn-scan" style="flex:1">Scan</button>
@@ -744,7 +711,6 @@
 // =============================================================================
 
 // ---- State ------------------------------------------------------------------
-let currentScope = "selection";
 let scanFindings    = [];   // Finding[] from the last scan
 let availableTokens = [];   // AvailableToken[] from the last scan (for group dropdowns)
 let fullLogText     = "";   // Plain-text accumulator for "Copy Log"
@@ -867,15 +833,6 @@ elBtnRefresh.addEventListener("click", () => {
   parent.postMessage({ pluginMessage: { type: "get-collections" } }, "*");
 });
 
-// ---- Scope toggle -----------------------------------------------------------
-document.querySelectorAll(".toggle-btn").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".toggle-btn").forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    currentScope = btn.dataset.scope;
-  });
-});
-
 // ---- Scan -------------------------------------------------------------------
 elBtnScan.addEventListener("click", () => {
   const filter = elFilter.value.trim() || "spacing";
@@ -892,7 +849,6 @@ elBtnScan.addEventListener("click", () => {
     pluginMessage: {
       type: "scan",
       collectionFilter: filter,
-      scope: currentScope,
       selectedLocalIds: localIds,
       selectedLibraryKeys: libraryKeys,
     }
@@ -1269,12 +1225,11 @@ const elBtnNewScan   = document.getElementById("btn-new-scan");
 
 function collapseSetup() {
   // Build a one-line summary of what was scanned
-  const scopeText = currentScope === "selection" ? "Selection" : "Full Page";
   const checked = elCollectionList.querySelectorAll("input[type=checkbox]:checked");
   const collText = checked.length > 0
     ? `${checked.length} collection${checked.length > 1 ? "s" : ""}`
     : `"${elFilter.value.trim() || "spacing"}" filter`;
-  elSummaryDetail.textContent = `${scopeText} · ${collText}`;
+  elSummaryDetail.textContent = `Selection · ${collText}`;
 
   elSetupPanel.classList.add("collapsed");
   elSetupSummary.classList.add("visible");
