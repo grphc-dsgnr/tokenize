@@ -404,6 +404,11 @@ function ingestVariable(v: Variable): void {
     return;
   }
 
+  // Zero-value tokens can never be matched: checkProperty silently ignores
+  // 0px spacing properties, so registering 0 in the map is pointless.
+  // The variable is still in variableByIdCache for group-assign dropdowns.
+  if (raw === 0) return;
+
   // Only override if not already set (first-match wins, keeps it deterministic)
   if (!valueToVariableMap.has(raw)) {
     valueToVariableMap.set(raw, { variable: v, name: v.name });
@@ -486,6 +491,10 @@ async function scanAllNodes(roots: SceneNode[]): Promise<Finding[]> {
  * Check one spacing property on one node.
  * Returns a Finding if the value is hardcoded (not already variable-bound),
  * or null if the property is already tokenized or not applicable.
+ *
+ * Deliberately silent on early-return paths (not-a-number, zero, already-bound)
+ * because those are the majority of calls on any real document and logging them
+ * generates thousands of noise entries that slow down flushLog significantly.
  */
 function checkProperty(
   node: FrameNode | ComponentNode | InstanceNode,
@@ -493,38 +502,22 @@ function checkProperty(
 ): Finding | null {
   // counterAxisSpacing only exists when counterAxisAlignItems is 'BASELINE'
   // or when wrapping is enabled — it may be absent; guard with a type check.
-  // Cast through unknown to safely read an arbitrary property by string key.
   const rawValue: unknown = (node as unknown as Record<string, unknown>)[prop];
-  if (typeof rawValue !== "number") {
-    log("info", `    ${prop}: not present or not a number, skipping`);
-    return null;
-  }
-
-  // A spacing of 0 is intentional and has no meaningful token to match against.
-  if (rawValue === 0) {
-    log("info", `    ${prop}: 0 — zero spacing, skipping token match`);
-    return null;
-  }
-
-  // Check if already bound to a variable
+  // Not present / not a number → nothing to audit.
+  if (typeof rawValue !== "number") return null;
+  // Zero spacing is intentional and has no token to match against.
+  if (rawValue === 0) return null;
+  // Already bound to a variable → already tokenized.
   const boundVars = node.boundVariables as Record<string, VariableAlias | undefined> | undefined;
-  const alreadyBound = boundVars && prop in boundVars && boundVars[prop] !== undefined;
-
-  if (alreadyBound) {
-    log("info", `    ${prop}: ${rawValue} — already bound to variable, skipping`);
-    return null;
-  }
-
-  log("info", `    ${prop}: ${rawValue} — hardcoded, checking for match...`);
+  if (boundVars?.[prop] !== undefined) return null;
 
   // Look up in our value map
   const match = valueToVariableMap.get(rawValue);
 
   if (match) {
-    log("success", `    Match found: ${prop}=${rawValue} → "${match.name}"`);
+    log("success", `  Match: ${node.name}.${prop}=${rawValue} → "${match.name}"`);
   } else {
-    const candidates = [...valueToVariableMap.keys()].sort((a, b) => a - b).join(", ");
-    log("warn", `    No match for ${prop}=${rawValue}. Available values: [${candidates || "none"}]`);
+    log("warn", `  No match: ${node.name}.${prop}=${rawValue} (${valueToVariableMap.size} tokens loaded)`);
   }
 
   return {
@@ -546,93 +539,103 @@ function checkProperty(
  * Apply variable bindings for all findings that have a matched variable.
  * Returns the updated findings array (with replaced flags set).
  *
- * Optimisations vs the naive approach:
- *  - Groups findings by nodeId so each node is fetched only once (a node
- *    can have up to 6 spacing properties, each producing a Finding).
- *  - Pre-fetches any variables not already in the cache in a single
- *    deduplication pass before the main loop begins.
- *  - Yields control back to the Figma sandbox every ~16 ms (one frame) so
- *    the UI spinner stays alive and the editor doesn't appear frozen.
- *  - Sends `progress` messages so the UI can show a deterministic counter.
+ * Performance strategy:
+ *  - Skips findings that are already replaced (idempotent guard).
+ *  - Deduplicates + parallelises variable pre-fetches so each missing variable
+ *    is fetched exactly once and all fetches run concurrently.
+ *  - Groups findings by nodeId (a node with 6 spacing properties produced 6
+ *    findings, but we only need one getNodeByIdAsync call per node).
+ *  - Fetches nodes in batches of 20 concurrently instead of one-at-a-time,
+ *    dramatically cutting the number of sequential round-trips.
+ *  - Yields between every node batch so the UI stays responsive.
  */
 async function applyReplacements(findings: Finding[]): Promise<Finding[]> {
   log("info", "=== Applying Replacements ===");
 
-  // --- Pre-fetch any variables not already in the id cache ---
-  // Deduplicate variable IDs so each is fetched at most once.
-  const uniqueVarIds = [
+  // --- Pre-fetch variables not yet in the cache (parallel, deduplicated) ---
+  const missingVarIds = [
     ...new Set(
       findings
-        .map((f) => f.matchedVariableId)
-        .filter((id): id is string => id !== null && !variableByIdCache.has(id))
+        .filter((f) => f.matchedVariableId && !f.replaced && !variableByIdCache.has(f.matchedVariableId))
+        .map((f) => f.matchedVariableId as string)
     ),
   ];
-  for (const varId of uniqueVarIds) {
-    try {
-      const v = await figma.variables.getVariableByIdAsync(varId);
-      if (v) variableByIdCache.set(varId, v);
-    } catch (err) {
-      log("warn", `Pre-fetch failed for variable id=${varId}: ${err}`);
-    }
+  if (missingVarIds.length > 0) {
+    await Promise.allSettled(
+      missingVarIds.map(async (varId) => {
+        try {
+          const v = await figma.variables.getVariableByIdAsync(varId);
+          if (v) variableByIdCache.set(varId, v);
+        } catch (err) {
+          log("warn", `Pre-fetch failed for variable id=${varId}: ${err}`);
+        }
+      })
+    );
   }
 
-  // --- Group findings by nodeId to avoid redundant getNodeByIdAsync calls ---
+  // --- Group pending findings by nodeId (skip already-replaced / unmatched) ---
   const nodeGroups = new Map<string, Finding[]>();
   for (const finding of findings) {
-    if (!finding.matchedVariableId) continue;
+    if (!finding.matchedVariableId || finding.replaced) continue;
     if (!nodeGroups.has(finding.nodeId)) nodeGroups.set(finding.nodeId, []);
     nodeGroups.get(finding.nodeId)!.push(finding);
   }
 
+  const nodeIds = [...nodeGroups.keys()];
   const totalMatched = [...nodeGroups.values()].reduce((s, g) => s + g.length, 0);
   let replaced = 0;
   let skipped = 0;
   let processed = 0;
-  let lastYield = Date.now();
 
   figma.ui.postMessage({ type: "progress", phase: "replace", current: 0, total: totalMatched });
 
-  for (const [nodeId, nodeFindings] of nodeGroups) {
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node) {
-      log("error", `Node "${nodeFindings[0].nodeName}" (id=${nodeId}) not found — may have been deleted`);
-      skipped += nodeFindings.length;
-      processed += nodeFindings.length;
-    } else {
-      for (const finding of nodeFindings) {
-        const variable = variableByIdCache.get(finding.matchedVariableId!);
-        if (!variable) {
-          log("error", `Variable id=${finding.matchedVariableId} not found for "${finding.nodeName}.${finding.property}"`);
-          skipped++;
-        } else {
-          log("info", `setBoundVariable(node="${finding.nodeName}", prop=${finding.property}, var="${variable.name}")`);
-          try {
-            (node as FrameNode).setBoundVariable(finding.property as VariableBindableNodeField, variable);
-            log("success", `  ✓ Bound ${finding.property} on "${finding.nodeName}" → "${variable.name}"`);
-            finding.replaced = true;
-            replaced++;
-          } catch (err) {
-            log("error", `  ✗ setBoundVariable failed for "${finding.nodeName}.${finding.property}": ${err}`);
+  // --- Fetch nodes in batches and apply bindings ---
+  // Batching parallelises the async lookups while keeping concurrency bounded
+  // so we don't overwhelm the Figma sandbox with too many in-flight requests.
+  const NODE_BATCH = 20;
+  for (let bi = 0; bi < nodeIds.length; bi += NODE_BATCH) {
+    const batchIds = nodeIds.slice(bi, bi + NODE_BATCH);
+    const batchNodes = await Promise.allSettled(
+      batchIds.map((id) => figma.getNodeByIdAsync(id))
+    );
+
+    for (let j = 0; j < batchIds.length; j++) {
+      const nodeId = batchIds[j];
+      const nodeFindings = nodeGroups.get(nodeId)!;
+      const result = batchNodes[j];
+
+      if (result.status === "rejected" || !result.value) {
+        log("error", `Node "${nodeFindings[0].nodeName}" (id=${nodeId}) not found — may have been deleted`);
+        skipped += nodeFindings.length;
+        processed += nodeFindings.length;
+      } else {
+        const node = result.value;
+        for (const finding of nodeFindings) {
+          const variable = variableByIdCache.get(finding.matchedVariableId!);
+          if (!variable) {
+            log("error", `Variable id=${finding.matchedVariableId} not found for "${finding.nodeName}.${finding.property}"`);
             skipped++;
+          } else {
+            try {
+              (node as FrameNode).setBoundVariable(finding.property as VariableBindableNodeField, variable);
+              log("success", `  ✓ ${finding.nodeName}.${finding.property} → "${variable.name}"`);
+              finding.replaced = true;
+              replaced++;
+            } catch (err) {
+              log("error", `  ✗ setBoundVariable failed: ${finding.nodeName}.${finding.property}: ${err}`);
+              skipped++;
+            }
           }
+          processed++;
         }
-        processed++;
       }
     }
 
-    // Yield every ~16 ms (one frame) to keep the UI and editor responsive.
-    if (Date.now() - lastYield >= 16) {
-      figma.ui.postMessage({ type: "progress", phase: "replace", current: processed, total: totalMatched });
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      lastYield = Date.now();
-    }
+    figma.ui.postMessage({ type: "progress", phase: "replace", current: processed, total: totalMatched });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
 
-  // Count skipped findings that had no matchedVariableId from the start.
-  const unmatchedSkipped = findings.filter((f) => !f.matchedVariableId).length;
-
-  figma.ui.postMessage({ type: "progress", phase: "replace", current: processed, total: totalMatched });
-  log("info", `Replacement complete: ${replaced} replaced, ${skipped + unmatchedSkipped} skipped/unresolved`);
+  log("info", `Replacement complete: ${replaced} replaced, ${skipped} skipped/unresolved`);
   flushLog();
   return findings;
 }
