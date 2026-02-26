@@ -344,17 +344,24 @@ async function buildValueMap(
       continue;
     }
 
-    // Fire all imports in parallel — eliminates per-variable round-trip latency.
-    const importResults = await Promise.allSettled(
-      libVarStubs.map(stub => figma.variables.importVariableByKeyAsync(stub.key))
-    );
-    for (let i = 0; i < importResults.length; i++) {
-      const result = importResults[i];
-      if (result.status === "fulfilled") {
-        ingestVariable(result.value);
-      } else {
-        log("warn", `  Import failed for variable "${libVarStubs[i].name}" (key=${libVarStubs[i].key}): ${result.reason}`);
+    // Import in batches to avoid overwhelming the Figma API with hundreds of
+    // concurrent requests (which can cause the sandbox to freeze).
+    const IMPORT_BATCH = 10;
+    for (let i = 0; i < libVarStubs.length; i += IMPORT_BATCH) {
+      const batch = libVarStubs.slice(i, i + IMPORT_BATCH);
+      const batchResults = await Promise.allSettled(
+        batch.map((stub) => figma.variables.importVariableByKeyAsync(stub.key))
+      );
+      for (let j = 0; j < batchResults.length; j++) {
+        const result = batchResults[j];
+        if (result.status === "fulfilled") {
+          ingestVariable(result.value);
+        } else {
+          log("warn", `  Import failed for variable "${batch[j].name}" (key=${batch[j].key}): ${result.reason}`);
+        }
       }
+      // Yield between batches so the UI stays responsive during large imports.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
   }
 
@@ -442,14 +449,12 @@ async function scanAllNodes(roots: SceneNode[]): Promise<Finding[]> {
   while (stack.length > 0) {
     const node = stack.pop()!;
 
-    log("info", `Scanning node: "${node.name}" (type=${node.type})`);
-
     if (
       "layoutMode" in node &&
       node.layoutMode !== "NONE" &&
       node.layoutMode !== undefined
     ) {
-      log("info", `  Auto Layout detected (mode=${node.layoutMode})`);
+      log("info", `Scanning Auto Layout node: "${node.name}" (type=${node.type}, mode=${node.layoutMode})`);
       for (const prop of SPACING_PROPERTIES) {
         const finding = checkProperty(node as FrameNode | ComponentNode | InstanceNode, prop);
         if (finding) allFindings.push(finding);
@@ -540,55 +545,94 @@ function checkProperty(
 /**
  * Apply variable bindings for all findings that have a matched variable.
  * Returns the updated findings array (with replaced flags set).
+ *
+ * Optimisations vs the naive approach:
+ *  - Groups findings by nodeId so each node is fetched only once (a node
+ *    can have up to 6 spacing properties, each producing a Finding).
+ *  - Pre-fetches any variables not already in the cache in a single
+ *    deduplication pass before the main loop begins.
+ *  - Yields control back to the Figma sandbox every ~16 ms (one frame) so
+ *    the UI spinner stays alive and the editor doesn't appear frozen.
+ *  - Sends `progress` messages so the UI can show a deterministic counter.
  */
 async function applyReplacements(findings: Finding[]): Promise<Finding[]> {
   log("info", "=== Applying Replacements ===");
 
-  let replaced = 0;
-  let skipped = 0;
-
-  for (const finding of findings) {
-    if (!finding.matchedVariableId) {
-      skipped++;
-      continue;
-    }
-
-    const node = await figma.getNodeByIdAsync(finding.nodeId);
-    if (!node) {
-      log("error", `Node "${finding.nodeName}" (id=${finding.nodeId}) not found — may have been deleted`);
-      skipped++;
-      continue;
-    }
-
-    // Prefer the live variable object cached during scan so that
-    // setBoundVariable receives a fully-hydrated object and does not
-    // trigger an internal sync getVariableById call (blocked under
-    // documentAccess: "dynamic-page").
-    const variable = variableByIdCache.get(finding.matchedVariableId)
-      ?? await figma.variables.getVariableByIdAsync(finding.matchedVariableId);
-    if (!variable) {
-      log("error", `Variable id=${finding.matchedVariableId} not found for "${finding.nodeName}.${finding.property}"`);
-      skipped++;
-      continue;
-    }
-
-    log(
-      "info",
-      `setBoundVariable(node="${finding.nodeName}", prop=${finding.property}, var="${variable.name}")`
-    );
-
+  // --- Pre-fetch any variables not already in the id cache ---
+  // Deduplicate variable IDs so each is fetched at most once.
+  const uniqueVarIds = [
+    ...new Set(
+      findings
+        .map((f) => f.matchedVariableId)
+        .filter((id): id is string => id !== null && !variableByIdCache.has(id))
+    ),
+  ];
+  for (const varId of uniqueVarIds) {
     try {
-      (node as FrameNode).setBoundVariable(finding.property as VariableBindableNodeField, variable);
-      log("success", `  ✓ Bound ${finding.property} on "${finding.nodeName}" → "${variable.name}"`);
-      finding.replaced = true;
-      replaced++;
+      const v = await figma.variables.getVariableByIdAsync(varId);
+      if (v) variableByIdCache.set(varId, v);
     } catch (err) {
-      log("error", `  ✗ setBoundVariable failed for "${finding.nodeName}.${finding.property}": ${err}`);
-      skipped++;
+      log("warn", `Pre-fetch failed for variable id=${varId}: ${err}`);
     }
   }
 
-  log("info", `Replacement complete: ${replaced} replaced, ${skipped} skipped/unresolved`);
+  // --- Group findings by nodeId to avoid redundant getNodeByIdAsync calls ---
+  const nodeGroups = new Map<string, Finding[]>();
+  for (const finding of findings) {
+    if (!finding.matchedVariableId) continue;
+    if (!nodeGroups.has(finding.nodeId)) nodeGroups.set(finding.nodeId, []);
+    nodeGroups.get(finding.nodeId)!.push(finding);
+  }
+
+  const totalMatched = [...nodeGroups.values()].reduce((s, g) => s + g.length, 0);
+  let replaced = 0;
+  let skipped = 0;
+  let processed = 0;
+  let lastYield = Date.now();
+
+  figma.ui.postMessage({ type: "progress", phase: "replace", current: 0, total: totalMatched });
+
+  for (const [nodeId, nodeFindings] of nodeGroups) {
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      log("error", `Node "${nodeFindings[0].nodeName}" (id=${nodeId}) not found — may have been deleted`);
+      skipped += nodeFindings.length;
+      processed += nodeFindings.length;
+    } else {
+      for (const finding of nodeFindings) {
+        const variable = variableByIdCache.get(finding.matchedVariableId!);
+        if (!variable) {
+          log("error", `Variable id=${finding.matchedVariableId} not found for "${finding.nodeName}.${finding.property}"`);
+          skipped++;
+        } else {
+          log("info", `setBoundVariable(node="${finding.nodeName}", prop=${finding.property}, var="${variable.name}")`);
+          try {
+            (node as FrameNode).setBoundVariable(finding.property as VariableBindableNodeField, variable);
+            log("success", `  ✓ Bound ${finding.property} on "${finding.nodeName}" → "${variable.name}"`);
+            finding.replaced = true;
+            replaced++;
+          } catch (err) {
+            log("error", `  ✗ setBoundVariable failed for "${finding.nodeName}.${finding.property}": ${err}`);
+            skipped++;
+          }
+        }
+        processed++;
+      }
+    }
+
+    // Yield every ~16 ms (one frame) to keep the UI and editor responsive.
+    if (Date.now() - lastYield >= 16) {
+      figma.ui.postMessage({ type: "progress", phase: "replace", current: processed, total: totalMatched });
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      lastYield = Date.now();
+    }
+  }
+
+  // Count skipped findings that had no matchedVariableId from the start.
+  const unmatchedSkipped = findings.filter((f) => !f.matchedVariableId).length;
+
+  figma.ui.postMessage({ type: "progress", phase: "replace", current: processed, total: totalMatched });
+  log("info", `Replacement complete: ${replaced} replaced, ${skipped + unmatchedSkipped} skipped/unresolved`);
   flushLog();
   return findings;
 }

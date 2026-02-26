@@ -867,6 +867,9 @@ window.onmessage = (event) => {
     } else if (msg.phase === "scan" && msg.total > 0) {
       const pct = Math.round((msg.current / msg.total) * 100);
       elLoadingLbl.textContent = `Scanning\u2026 ${msg.current} / ${msg.total} (${pct}%)`;
+    } else if (msg.phase === "replace" && msg.total > 0) {
+      const pct = Math.round((msg.current / msg.total) * 100);
+      elLoadingLbl.textContent = `Replacing\u2026 ${msg.current} / ${msg.total} (${pct}%)`;
     }
   }
 
